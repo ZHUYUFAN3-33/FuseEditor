@@ -1,4 +1,4 @@
-import type { Clip as ClipT, MediaSource } from '../types'
+import type { Clip as ClipT, Keyframe, MediaSource } from '../types'
 import { middleEllipsis } from '../lib/format'
 import WaveformCanvas from './WaveformCanvas'
 import SeriesCanvas from './SeriesCanvas'
@@ -12,6 +12,7 @@ interface Props {
   pixelsPerSecond: number
   height: number
   ampScale: number
+  automation?: Keyframe[]
   tool: Tool
   selected: boolean
   locked: boolean
@@ -19,6 +20,7 @@ interface Props {
   onBladeSplit: (id: string, offsetSec: number) => void
   onBodyDown: (id: string, e: React.PointerEvent) => void
   onTrimDown: (id: string, edge: 'l' | 'r', e: React.PointerEvent) => void
+  onFadeDown: (id: string, edge: 'l' | 'r', e: React.PointerEvent) => void
 }
 
 export default function Clip({
@@ -28,6 +30,7 @@ export default function Clip({
   pixelsPerSecond,
   height,
   ampScale,
+  automation,
   tool,
   selected,
   locked,
@@ -35,10 +38,14 @@ export default function Clip({
   onBladeSplit,
   onBodyDown,
   onTrimDown,
+  onFadeDown,
 }: Props) {
   const left = clip.start * pixelsPerSecond
   const width = Math.max(2, clip.duration * pixelsPerSecond)
   const vizHeight = height - 8 - 14 // clip padding + label row
+  const fadeInPx = (clip.fadeIn ?? 0) * pixelsPerSecond
+  const fadeOutPx = (clip.fadeOut ?? 0) * pixelsPerSecond
+  const editable = tool === 'select' && !locked
 
   function handlePointerDown(e: React.PointerEvent) {
     if (locked || tool === 'blade') return // locked = no move; blade handled on click
@@ -78,6 +85,9 @@ export default function Clip({
             height={vizHeight}
             color={color}
             ampScale={ampScale}
+            automation={automation}
+            clipStart={clip.start}
+            clipDuration={clip.duration}
           />
         )}
         {source.csv && (
@@ -88,6 +98,8 @@ export default function Clip({
             width={width}
             height={vizHeight}
             ampScale={ampScale}
+            automation={automation}
+            clipStart={clip.start}
           />
         )}
         {!source.waveform && !source.csv && source.kind === 'video' && (
@@ -95,8 +107,34 @@ export default function Clip({
         )}
       </div>
 
-      {tool === 'select' && !locked && (
+      {/* fade-in / fade-out shapes (drawn from the top corners, DaVinci-style) */}
+      {(fadeInPx > 0 || fadeOutPx > 0) && (
+        <svg className="clip__fades" width={width} height={height - 8} preserveAspectRatio="none">
+          {fadeInPx > 0 && <polygon points={`0,${height - 8} 0,0 ${fadeInPx},0`} />}
+          {fadeOutPx > 0 && <polygon points={`${width},${height - 8} ${width},0 ${width - fadeOutPx},0`} />}
+        </svg>
+      )}
+
+      {editable && (
         <>
+          <div
+            className="clip__fade clip__fade--l"
+            style={{ left: Math.max(0, fadeInPx - 5) }}
+            title="Drag to fade in"
+            onPointerDown={(e) => {
+              e.stopPropagation()
+              onFadeDown(clip.id, 'l', e)
+            }}
+          />
+          <div
+            className="clip__fade clip__fade--r"
+            style={{ right: Math.max(0, fadeOutPx - 5) }}
+            title="Drag to fade out"
+            onPointerDown={(e) => {
+              e.stopPropagation()
+              onFadeDown(clip.id, 'r', e)
+            }}
+          />
           <div
             className="clip__trim clip__trim--l"
             onPointerDown={(e) => {

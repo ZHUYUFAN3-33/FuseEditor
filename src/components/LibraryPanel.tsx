@@ -1,0 +1,182 @@
+import { useState } from 'react'
+import type { MediaSource, RawItem } from '../types'
+import { middleEllipsis } from '../lib/format'
+import { PROCESS_PARAMS } from '../lib/process'
+
+interface Props {
+  width: number
+  rawData: RawItem[]
+  librarySources: MediaSource[]
+  onTimelineSourceIds: Set<string>
+  processingId: string | null
+  onImport: () => void
+  onImportFiles: (files: FileList) => void
+  onProcess: (rawId: string) => void
+  onProcessAll: () => void
+  onRemoveRaw: (rawId: string) => void
+  onRemoveSource: (sourceId: string) => void
+  onRelink: (sourceId: string) => void
+  onDragSourceStart: (kind: MediaSource['kind']) => void
+  onDragSourceEnd: () => void
+}
+
+const KIND_ICON: Record<MediaSource['kind'], string> = { video: '🎬', audio: '🎵', csv: '📈' }
+
+export default function LibraryPanel({
+  width,
+  rawData,
+  librarySources,
+  onTimelineSourceIds,
+  processingId,
+  onImport,
+  onImportFiles,
+  onProcess,
+  onProcessAll,
+  onRemoveRaw,
+  onRemoveSource,
+  onRelink,
+  onDragSourceStart,
+  onDragSourceEnd,
+}: Props) {
+  const [dragOver, setDragOver] = useState(false)
+  const [kindFilter, setKindFilter] = useState<'all' | MediaSource['kind']>('all')
+  // Hide the audio sources extracted from videos — they ride along with the video.
+  const ready = librarySources.filter((s) => !s.name.endsWith(' · audio'))
+  const visible = kindFilter === 'all' ? ready : ready.filter((s) => s.kind === kindFilter)
+  const FILTERS: ['all' | MediaSource['kind'], string][] = [
+    ['all', 'All'],
+    ['video', '🎬'],
+    ['audio', '🎵'],
+    ['csv', '📈'],
+  ]
+  const count = (k: 'all' | MediaSource['kind']) => (k === 'all' ? ready.length : ready.filter((s) => s.kind === k).length)
+
+  return (
+    <aside className="library panel" style={{ width, flexShrink: 0 }}>
+      {/* ① Import */}
+      <div className="stage__header">
+        <span className="stage__num">1</span> Import
+      </div>
+      <div
+        className={'library__drop' + (dragOver ? ' library__drop--over' : '')}
+        onClick={onImport}
+        onDragOver={(e) => {
+          e.preventDefault()
+          setDragOver(true)
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault()
+          setDragOver(false)
+          if (e.dataTransfer.files.length) onImportFiles(e.dataTransfer.files)
+        }}
+      >
+        <p>Drop files</p>
+        <span className="library__sub">raw CSV · video · audio</span>
+      </div>
+
+      {/* ② Process */}
+      <div className="stage__header">
+        <span className="stage__num">2</span> Process data
+        {rawData.length > 1 && (
+          <button className="stage__action" onClick={onProcessAll} disabled={!!processingId}>
+            Process all
+          </button>
+        )}
+      </div>
+      <div className="stage__params" title="Fixed processing parameters (ported from your script)">
+        60 Hz · SG win {PROCESS_PARAMS.SG_WINDOW}/poly {PROCESS_PARAMS.SG_POLY} · normalize · 🔒 fixed
+      </div>
+      <ul className="library__list">
+        {rawData.length === 0 && <li className="library__placeholder">No raw CSV waiting</li>}
+        {rawData.map((r) => (
+          <li key={r.id} className={'raw__item' + (r.error ? ' raw__item--err' : '')}>
+            <div className="raw__row">
+              <span className="mediabin__icon">📈</span>
+              <span className="library__name" title={r.name}>
+                {middleEllipsis(r.name, 18)}
+              </span>
+              <button className="raw__btn" disabled={!!processingId} onClick={() => onProcess(r.id)}>
+                {processingId === r.id ? '…' : 'Process'}
+              </button>
+              <button className="track__remove" title="Discard" onClick={() => onRemoveRaw(r.id)}>
+                ✕
+              </button>
+            </div>
+            {r.error && <div className="raw__err">{r.error}</div>}
+          </li>
+        ))}
+      </ul>
+
+      {/* ③ Ready → timeline */}
+      <div className="stage__header">
+        <span className="stage__num">3</span> Ready → timeline
+      </div>
+      <div className="library__filters">
+        {FILTERS.map(([key, label]) => (
+          <button
+            key={key}
+            className={'library__filter' + (kindFilter === key ? ' library__filter--on' : '')}
+            onClick={() => setKindFilter(key)}
+            title={key === 'all' ? 'All' : key}
+          >
+            {label} <span className="library__filtercount">{count(key)}</span>
+          </button>
+        ))}
+      </div>
+      <ul className="library__list library__list--grow">
+        {visible.length === 0 && (
+          <li className="library__placeholder">
+            {ready.length === 0 ? 'Process data / import media first' : `No ${kindFilter} sources`}
+          </li>
+        )}
+        {visible.map((s) => {
+          const onTl = onTimelineSourceIds.has(s.id)
+          return (
+            <li
+              key={s.id}
+              className={'library__item' + (s.needsRelink ? ' library__item--relink' : ' library__item--drag')}
+              draggable={!s.needsRelink}
+              title={s.needsRelink ? `Re-import "${s.name}" to restore` : 'Drag onto a track in the timeline'}
+              onDragStart={(e) => {
+                if (s.needsRelink) return
+                e.dataTransfer.setData('text/experium-source', s.id)
+                e.dataTransfer.effectAllowed = 'copy'
+                onDragSourceStart(s.kind)
+              }}
+              onDragEnd={onDragSourceEnd}
+            >
+              <span className="mediabin__icon">{KIND_ICON[s.kind]}</span>
+              <span className="library__name">{middleEllipsis(s.name, 16)}</span>
+              {s.needsRelink ? (
+                <button
+                  className="library__relink"
+                  title="Media missing — click to pick the original file and restore it"
+                  onClick={() => onRelink(s.id)}
+                >
+                  ⚠ re-link
+                </button>
+              ) : (
+                <span className="library__hint">
+                  {onTl ? '✓ ' : ''}
+                  {s.fullDuration ? `${s.fullDuration.toFixed(1)}s` : '—'}
+                </span>
+              )}
+              <button
+                className="track__remove"
+                title="Delete from pool"
+                draggable={false}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRemoveSource(s.id)
+                }}
+              >
+                ✕
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </aside>
+  )
+}

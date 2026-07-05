@@ -3,6 +3,7 @@ import { fmtTime } from '../lib/format'
 
 interface Props {
   videoUrl?: string
+  videoCovered: boolean
   videoTime: number | null
   isPlaying: boolean
   loop: boolean
@@ -17,6 +18,7 @@ interface Props {
 
 export default function Preview({
   videoUrl,
+  videoCovered,
   videoTime,
   isPlaying,
   loop,
@@ -47,14 +49,23 @@ export default function Preview({
   return (
     <section className="preview">
       <div className="preview__stage">
-        {videoUrl ? (
+        {/* Keep the element mounted for smooth sync, but hide it where there is no
+            video at the playhead — the preview must not lie about gaps. */}
+        {videoUrl && (
           // muted: all audio (including this video's track) is mixed by the engine
-          <video ref={ref} className="preview__video" src={videoUrl} muted />
-        ) : (
+          <video
+            ref={ref}
+            className="preview__video"
+            src={videoUrl}
+            muted
+            style={{ display: videoCovered ? 'block' : 'none' }}
+          />
+        )}
+        {(!videoUrl || !videoCovered) && (
           <div className="preview__placeholder">
-            <span className="preview__icon">▶</span>
-            <p>Preview</p>
-            <span className="preview__sub">import a video to preview it here</span>
+            <span className="preview__icon">{videoUrl ? '▦' : '▶'}</span>
+            <p>{videoUrl ? 'No video here' : 'Preview'}</p>
+            <span className="preview__sub">{videoUrl ? 'playhead is in a gap' : 'import a video to preview it here'}</span>
           </div>
         )}
       </div>

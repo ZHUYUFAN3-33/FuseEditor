@@ -1,5 +1,6 @@
 import { getAudioContext } from './audio'
-import type { GainState, MediaSource, Project } from '../types'
+import { scheduleGain } from './automation'
+import type { GainState, MediaSource, Project, Track } from '../types'
 
 /**
  * Sample-accurate multi-track mixer. Schedules every audio clip's buffer slice
@@ -56,11 +57,16 @@ export class AudioEngine {
     return g
   }
 
-  applyTrackGains(gains: Record<string, GainState>) {
+  /** Apply per-track gain, following each track's volume keyframe curve (anchored to the
+   *  current playhead so changes mid-playback re-ramp from where we are). */
+  applyMix(tracks: Track[], gains: Record<string, GainState>) {
     const anySolo = Object.values(gains).some((s) => s.solo)
-    for (const [tid, s] of Object.entries(gains)) {
-      const on = !s.muted && (!anySolo || s.solo)
-      this.trackGain(tid).gain.value = on ? s.volume : 0
+    const now = this.ctx.currentTime
+    const fromSec = this.getTime()
+    for (const track of tracks) {
+      const s = gains[track.id]
+      const base = s ? (!s.muted && (!anySolo || s.solo) ? s.volume : 0) : 1
+      scheduleGain(this.trackGain(track.id).gain, track.intensity, base, now, fromSec)
     }
   }
 
@@ -90,12 +96,12 @@ export class AudioEngine {
     await this.ctx.resume()
     this.stopSources()
     this.setMasterVolume(masterVolume)
-    this.applyTrackGains(gains)
 
     const now = this.ctx.currentTime
     this.anchorCtxTime = now
     this.anchorPlayhead = fromSec
     this.playing = true
+    this.applyMix(project.tracks, gains) // schedule volume automation from this point
 
     for (const clip of project.clips) {
       const buf = sources[clip.sourceId]?.audioBuffer

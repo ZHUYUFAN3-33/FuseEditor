@@ -1,4 +1,6 @@
 import { useEffect, useRef } from 'react'
+import { intensityAt } from '../lib/automation'
+import type { Keyframe } from '../types'
 
 interface Props {
   peaks: number[] // full-source peaks
@@ -8,6 +10,9 @@ interface Props {
   height: number
   color: string
   ampScale: number
+  automation?: Keyframe[] // volume curve to visualise (per-track)
+  clipStart: number // clip's timeline start (s)
+  clipDuration: number // clip length (s)
 }
 
 export default function WaveformCanvas({
@@ -18,6 +23,9 @@ export default function WaveformCanvas({
   height,
   color,
   ampScale,
+  automation,
+  clipStart,
+  clipDuration,
 }: Props) {
   const ref = useRef<HTMLCanvasElement>(null)
 
@@ -38,15 +46,18 @@ export default function WaveformCanvas({
     const span = Math.max(1, hi - lo)
     const mid = height / 2
     ctx.fillStyle = color
+    const hasAuto = automation != null && automation.length > 0
     for (let x = 0; x < width; x++) {
       const a = lo + Math.floor((x / width) * span)
       const b = Math.max(a + 1, lo + Math.floor(((x + 1) / width) * span))
       let amp = 0
       for (let i = a; i < b && i < n; i++) if (peaks[i] > amp) amp = peaks[i]
-      const h = Math.min(mid, amp * mid * ampScale)
+      // scale by the volume automation at this point on the timeline (live feedback)
+      const g = hasAuto ? intensityAt(automation, clipStart + (x / width) * clipDuration) : 1
+      const h = Math.min(mid, amp * mid * ampScale * g)
       ctx.fillRect(x, mid - h, 1, h * 2)
     }
-  }, [peaks, startFrac, endFrac, width, height, color, ampScale])
+  }, [peaks, startFrac, endFrac, width, height, color, ampScale, automation, clipStart, clipDuration])
 
   return <canvas ref={ref} style={{ width, height, display: 'block' }} />
 }

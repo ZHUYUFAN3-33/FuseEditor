@@ -28,6 +28,16 @@ export interface MediaSource {
   csv?: CsvData
   mediaUrl?: string
   audioBuffer?: AudioBuffer // decoded PCM for mixing playback (audio + video-audio)
+  linkedAudioId?: string // for video sources: the companion audio source extracted from it
+  needsRelink?: boolean // loaded from a .experium file without its media — re-import to restore
+}
+
+/** A raw uploaded CSV awaiting processing (stage ② of the workflow). */
+export interface RawItem {
+  id: string
+  name: string
+  text: string
+  error?: string
 }
 
 /** Per-track mixer state (kept outside undo history). */
@@ -55,6 +65,14 @@ export interface Clip {
   start: number // position on the timeline (seconds)
   inPoint: number // offset into the source (seconds)
   duration: number // length on the timeline (seconds)
+  fadeIn?: number // fade-in ramp (s) from the clip's start
+  fadeOut?: number // fade-out ramp (s) to the clip's end
+}
+
+/** One point on a track's intensity (0..1) automation curve, in timeline seconds. */
+export interface Keyframe {
+  t: number
+  v: number
 }
 
 export interface Track {
@@ -62,6 +80,7 @@ export interface Track {
   kind: TrackKind
   name: string
   color: string
+  intensity?: Keyframe[] // 0..1 gain applied along the timeline; empty/undefined = full (1)
 }
 
 /** The part of project state that is undoable. */

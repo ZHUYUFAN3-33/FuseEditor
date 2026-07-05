@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
-import type { CsvData } from '../types'
+import { intensityAt } from '../lib/automation'
+import type { CsvData, Keyframe } from '../types'
 
 interface Props {
   csv: CsvData
@@ -8,11 +9,13 @@ interface Props {
   width: number
   height: number
   ampScale: number
+  automation?: Keyframe[] // intensity curve to visualise (per-track)
+  clipStart: number // clip's timeline start (s)
 }
 
 const LINE_COLORS = ['#e0913a', '#4f7cff', '#2dbd8f', '#d65db1', '#ff6b6b', '#54c7ec']
 
-export default function SeriesCanvas({ csv, inPoint, duration, width, height, ampScale }: Props) {
+export default function SeriesCanvas({ csv, inPoint, duration, width, height, ampScale, automation, clipStart }: Props) {
   const ref = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
@@ -30,6 +33,7 @@ export default function SeriesCanvas({ csv, inPoint, duration, width, height, am
     const plotH = height - pad * 2
     const winStart = inPoint
     const winLen = duration || 1
+    const hasAuto = automation != null && automation.length > 0
 
     csv.series.forEach((s, idx) => {
       ctx.strokeStyle = LINE_COLORS[idx % LINE_COLORS.length]
@@ -42,7 +46,9 @@ export default function SeriesCanvas({ csv, inPoint, duration, width, height, am
         if (p.t < winStart || p.t > winStart + winLen) continue
         const x = ((p.t - winStart) / winLen) * width
         const norm = (p.v - s.min) / range
-        const centered = (norm - 0.5) * ampScale + 0.5
+        // scale amplitude by the intensity automation at this point (live feedback)
+        const g = hasAuto ? intensityAt(automation, clipStart + (p.t - winStart)) : 1
+        const centered = (norm - 0.5) * ampScale * g + 0.5
         const y = pad + (1 - centered) * plotH
         if (!started) {
           ctx.moveTo(x, y)
@@ -51,7 +57,7 @@ export default function SeriesCanvas({ csv, inPoint, duration, width, height, am
       }
       ctx.stroke()
     })
-  }, [csv, inPoint, duration, width, height, ampScale])
+  }, [csv, inPoint, duration, width, height, ampScale, automation, clipStart])
 
   return <canvas ref={ref} style={{ width, height, display: 'block' }} />
 }

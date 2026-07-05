@@ -10,6 +10,7 @@ interface HState<T> {
 type HAction<T> =
   | { type: 'commit'; next: T } // discrete action — pushes one undo entry
   | { type: 'live'; next: T } // transient update during a gesture — no history
+  | { type: 'reset'; next: T } // replace present and wipe history (e.g. loading a project)
   | { type: 'begin' }
   | { type: 'end' }
   | { type: 'undo' }
@@ -20,6 +21,8 @@ function reducer<T>(state: HState<T>, action: HAction<T>): HState<T> {
     case 'commit':
       if (action.next === state.present) return state
       return { past: [...state.past, state.present], present: action.next, future: [], baseline: null }
+    case 'reset':
+      return { past: [], present: action.next, future: [], baseline: null }
     case 'live':
       return { ...state, present: action.next }
     case 'begin':
@@ -58,6 +61,7 @@ export interface History<T> {
   state: T
   commit: (next: T) => void
   live: (next: T) => void
+  reset: (next: T) => void
   beginGesture: () => void
   endGesture: () => void
   undo: () => void
@@ -76,6 +80,7 @@ export function useHistory<T>(initial: T): History<T> {
 
   const commit = useCallback((next: T) => dispatch({ type: 'commit', next }), [])
   const live = useCallback((next: T) => dispatch({ type: 'live', next }), [])
+  const reset = useCallback((next: T) => dispatch({ type: 'reset', next }), [])
   const beginGesture = useCallback(() => dispatch({ type: 'begin' }), [])
   const endGesture = useCallback(() => dispatch({ type: 'end' }), [])
   const undo = useCallback(() => dispatch({ type: 'undo' }), [])
@@ -86,6 +91,7 @@ export function useHistory<T>(initial: T): History<T> {
       state: s.present,
       commit,
       live,
+      reset,
       beginGesture,
       endGesture,
       undo,
@@ -93,6 +99,6 @@ export function useHistory<T>(initial: T): History<T> {
       canUndo: s.past.length > 0,
       canRedo: s.future.length > 0,
     }),
-    [s.present, s.past.length, s.future.length, commit, live, beginGesture, endGesture, undo, redo],
+    [s.present, s.past.length, s.future.length, commit, live, reset, beginGesture, endGesture, undo, redo],
   )
 }

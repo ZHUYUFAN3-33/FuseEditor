@@ -1,27 +1,71 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import TopBar from './components/TopBar'
-import MediaBin from './components/MediaBin'
 import Preview from './components/Preview'
 import Inspector from './components/Inspector'
 import Timeline from './components/Timeline'
 import ResizeHandle from './components/ResizeHandle'
 import ExportDialog from './components/ExportDialog'
+import LibraryPanel from './components/LibraryPanel'
 import type { Tool } from './components/Clip'
-import type { Clip, GainMap, MediaSource, Project, Series, Track, TrackKind, TrackMix } from './types'
+import type { Clip, GainMap, MediaSource, Project, RawItem, Series, Track, TrackKind, TrackMix } from './types'
 import { decodeAudio, getMediaDuration } from './lib/audio'
-import { parseCsv } from './lib/csv'
 import { useHistory } from './lib/history'
 import { AudioEngine } from './lib/engine'
+import { resolveStart } from './lib/clips'
+import { CsvFormatError, processFmgCsv } from './lib/process'
 import { buildTimelineCsv, downloadBlob, downloadText, renderTimelineToWav } from './lib/export'
+import { loadMedia, loadSnapshot, saveMedia, saveSnapshot } from './lib/storage'
+import { parseProjectFile, serializeProject, type ProjectSnapshot } from './lib/projectFile'
 import './styles/app.css'
 
 let _seq = 0
 const id = (p: string) => `${p}_${++_seq}`
+// Keep the id counter ahead of any ids restored from a saved project.
+function bumpSeq(ids: string[]) {
+  for (const x of ids) {
+    const m = /_(\d+)$/.exec(x)
+    if (m && +m[1] > _seq) _seq = +m[1]
+  }
+}
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 const MIN_DUR = 0.05
 const DEFAULT_MIX: TrackMix = { muted: false, solo: false, volume: 1, locked: false }
 
 const COLORS: Record<TrackKind, string> = { video: '#4f7cff', audio: '#2dbd8f', csv: '#e0913a' }
+const TRACK_BASE: Record<TrackKind, string> = { video: 'Video', audio: 'Audio', csv: 'Data' }
+const KIND_ORDER: Record<TrackKind, number> = { video: 0, audio: 1, csv: 2 }
+const MAX_PER_KIND = 8
+
+function nextTrackName(kind: TrackKind, tracks: Track[]): string {
+  return `${TRACK_BASE[kind]} ${tracks.filter((t) => t.kind === kind).length + 1}`
+}
+
+/** Insert a track grouped with others of its kind (video → audio → csv top to bottom). */
+function insertGrouped(tracks: Track[], track: Track): Track[] {
+  let lastIdx = -1
+  for (let i = 0; i < tracks.length; i++) if (tracks[i].kind === track.kind) lastIdx = i
+  if (lastIdx >= 0) return [...tracks.slice(0, lastIdx + 1), track, ...tracks.slice(lastIdx + 1)]
+  let at = tracks.length
+  for (let i = 0; i < tracks.length; i++) {
+    if (KIND_ORDER[tracks[i].kind] > KIND_ORDER[track.kind]) {
+      at = i
+      break
+    }
+  }
+  return [...tracks.slice(0, at), track, ...tracks.slice(at)]
+}
+
+/** Default DaVinci-style tracks, present from the start (headers show even when empty). */
+function makeInitialProject(): Project {
+  return {
+    tracks: [
+      { id: id('trk'), kind: 'video', name: 'Video 1', color: COLORS.video },
+      { id: id('trk'), kind: 'audio', name: 'Audio 1', color: COLORS.audio },
+      { id: id('trk'), kind: 'csv', name: 'Data 1', color: COLORS.csv },
+    ],
+    clips: [],
+  }
+}
 
 function detectKind(file: File): TrackKind | null {
   if (file.type.startsWith('video/')) return 'video'
@@ -48,7 +92,8 @@ function sampleSeries(s: Series, t: number): number | null {
 }
 
 export default function App() {
-  const history = useHistory<Project>({ tracks: [], clips: [] })
+  const [initialProject] = useState(makeInitialProject)
+  const history = useHistory<Project>(initialProject)
   const project = history.state
 
   const [sources, setSources] = useState<Record<string, MediaSource>>({})
@@ -65,6 +110,17 @@ export default function App() {
   const [masterVolume, setMasterVolume] = useState(1)
   const [busy, setBusy] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [rawData, setRawData] = useState<RawItem[]>([])
+  const [processingId, setProcessingId] = useState<string | null>(null)
+
+  // persistence
+  const mediaFiles = useRef<Map<string, File>>(new Map()) // sourceId -> original File, for autosave + relink
+  const [storageReady, setStorageReady] = useState(false)
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle')
+  const projectInput = useRef<HTMLInputElement>(null)
+  const relinkInput = useRef<HTMLInputElement>(null)
+  const relinkTargetId = useRef<string | null>(null)
+  const lastMediaSig = useRef('')
 
   const [mediaWidth, setMediaWidth] = useState(240)
   const [inspectorWidth, setInspectorWidth] = useState(272)
@@ -111,68 +167,208 @@ export default function App() {
   ref.master.current = masterVolume
   ref.playing.current = isPlaying
 
-  // ---------- import ----------
-  const importFiles = useCallback(
-    async (fileList: FileList | null) => {
-      if (!fileList || fileList.length === 0) return
-      setBusy(true)
-      const addedSources: Record<string, MediaSource> = {}
-      const addedTracks: Track[] = []
-      const addedClips: Clip[] = []
-      try {
-        for (const file of Array.from(fileList)) {
-          const kind = detectKind(file)
-          if (!kind) continue
+  // ---------- import (stage ①: media → library, raw CSV → process queue) ----------
+  const importFiles = useCallback(async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return
+    setBusy(true)
+    const addedSources: Record<string, MediaSource> = {}
+    const addedRaw: RawItem[] = []
+    try {
+      for (const file of Array.from(fileList)) {
+        const kind = detectKind(file)
+        if (!kind) continue
 
+        // Re-link: this file restores a media source loaded from a .experium project.
+        const relink =
+          kind !== 'csv'
+            ? Object.values(ref.sources.current).find((s) => s.needsRelink && s.kind === kind && s.name === file.name)
+            : undefined
+        if (relink) {
           if (kind === 'video') {
-            const url = URL.createObjectURL(file)
-            const dur = (await getMediaDuration(url, 'video')) || 0
-            let decoded
-            try {
-              decoded = await decodeAudio(file)
-            } catch {
-              /* no decodable audio */
+            mediaFiles.current.set(relink.id, file)
+            addedSources[relink.id] = { ...relink, mediaUrl: URL.createObjectURL(file), needsRelink: undefined }
+            const aud = relink.linkedAudioId ? ref.sources.current[relink.linkedAudioId] : undefined
+            if (aud?.needsRelink) {
+              try {
+                const { audioBuffer, waveform } = await decodeAudio(file)
+                mediaFiles.current.set(aud.id, file)
+                addedSources[aud.id] = { ...aud, audioBuffer, waveform, needsRelink: undefined }
+              } catch {
+                /* keep needing relink */
+              }
             }
-            const realDur = dur || decoded?.waveform.duration || 0
-            const vSrc: MediaSource = { id: id('src'), kind: 'video', name: file.name, fullDuration: realDur, mediaUrl: url }
-            addedSources[vSrc.id] = vSrc
-            const vTrack: Track = { id: id('trk'), kind: 'video', name: file.name, color: COLORS.video }
-            addedTracks.push(vTrack)
-            addedClips.push({ id: id('clp'), sourceId: vSrc.id, trackId: vTrack.id, name: file.name, start: 0, inPoint: 0, duration: realDur })
-
-            if (decoded) {
-              const aSrc: MediaSource = { id: id('src'), kind: 'audio', name: `${file.name} · audio`, fullDuration: decoded.waveform.duration, waveform: decoded.waveform, audioBuffer: decoded.audioBuffer }
-              addedSources[aSrc.id] = aSrc
-              const aTrack: Track = { id: id('trk'), kind: 'audio', name: `${file.name} · audio`, color: COLORS.audio }
-              addedTracks.push(aTrack)
-              addedClips.push({ id: id('clp'), sourceId: aSrc.id, trackId: aTrack.id, name: aSrc.name, start: 0, inPoint: 0, duration: decoded.waveform.duration })
-            }
-          } else if (kind === 'audio') {
-            const { audioBuffer, waveform } = await decodeAudio(file)
-            const src: MediaSource = { id: id('src'), kind: 'audio', name: file.name, fullDuration: waveform.duration, waveform, audioBuffer }
-            addedSources[src.id] = src
-            const trk: Track = { id: id('trk'), kind: 'audio', name: file.name, color: COLORS.audio }
-            addedTracks.push(trk)
-            addedClips.push({ id: id('clp'), sourceId: src.id, trackId: trk.id, name: file.name, start: 0, inPoint: 0, duration: waveform.duration })
           } else {
-            const csv = parseCsv(await file.text())
-            const dur = csv.duration || 30
-            const src: MediaSource = { id: id('src'), kind: 'csv', name: file.name, fullDuration: dur, csv }
-            addedSources[src.id] = src
-            const trk: Track = { id: id('trk'), kind: 'csv', name: file.name, color: COLORS.csv }
-            addedTracks.push(trk)
-            addedClips.push({ id: id('clp'), sourceId: src.id, trackId: trk.id, name: file.name, start: 0, inPoint: 0, duration: dur })
+            try {
+              const { audioBuffer, waveform } = await decodeAudio(file)
+              mediaFiles.current.set(relink.id, file)
+              addedSources[relink.id] = { ...relink, audioBuffer, waveform, needsRelink: undefined }
+            } catch {
+              /* keep needing relink */
+            }
           }
+          continue
         }
-        if (addedTracks.length) {
-          setSources((prev) => ({ ...prev, ...addedSources }))
-          history.commit({ tracks: [...project.tracks, ...addedTracks], clips: [...project.clips, ...addedClips] })
+
+        if (kind === 'video') {
+          const url = URL.createObjectURL(file)
+          const dur = (await getMediaDuration(url, 'video')) || 0
+          let decoded
+          try {
+            decoded = await decodeAudio(file)
+          } catch {
+            /* no decodable audio */
+          }
+          const audioDur = decoded?.waveform.duration ?? 0
+          let realDur = Number.isFinite(dur) && dur > 0 ? dur : audioDur
+          if (!(realDur > 0)) {
+            console.warn(`Could not read duration for "${file.name}"; using a 10s placeholder. Trim to fit.`)
+            realDur = 10
+          }
+          const vSrc: MediaSource = { id: id('src'), kind: 'video', name: file.name, fullDuration: realDur, mediaUrl: url }
+          mediaFiles.current.set(vSrc.id, file)
+          if (decoded) {
+            const aSrc: MediaSource = { id: id('src'), kind: 'audio', name: `${file.name} · audio`, fullDuration: decoded.waveform.duration, waveform: decoded.waveform, audioBuffer: decoded.audioBuffer }
+            addedSources[aSrc.id] = aSrc
+            mediaFiles.current.set(aSrc.id, file)
+            vSrc.linkedAudioId = aSrc.id
+          }
+          addedSources[vSrc.id] = vSrc
+        } else if (kind === 'audio') {
+          const { audioBuffer, waveform } = await decodeAudio(file)
+          const src: MediaSource = { id: id('src'), kind: 'audio', name: file.name, fullDuration: waveform.duration, waveform, audioBuffer }
+          mediaFiles.current.set(src.id, file)
+          addedSources[src.id] = src
+        } else {
+          // raw CSV → process queue (stage ②), not the timeline yet
+          addedRaw.push({ id: id('raw'), name: file.name, text: await file.text() })
         }
-      } finally {
-        setBusy(false)
+      }
+      if (Object.keys(addedSources).length) setSources((prev) => ({ ...prev, ...addedSources }))
+      if (addedRaw.length) setRawData((prev) => [...prev, ...addedRaw])
+    } finally {
+      setBusy(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ---------- stage ②: process a raw CSV into a ready source ----------
+  const processRaw = useCallback((rawId: string) => {
+    setProcessingId(rawId)
+    // Defer so the spinner can paint before the (synchronous) heavy work.
+    setTimeout(() => {
+      setRawData((prev) => {
+        const item = prev.find((r) => r.id === rawId)
+        if (!item) return prev
+        try {
+          const result = processFmgCsv(item.text)
+          const src: MediaSource = { id: id('src'), kind: 'csv', name: item.name.replace(/\.csv$/i, '') + '-processed.csv', fullDuration: result.data.duration, csv: result.data }
+          setSources((s) => ({ ...s, [src.id]: src }))
+          return prev.filter((r) => r.id !== rawId)
+        } catch (e) {
+          const msg = e instanceof CsvFormatError ? e.message : `處理失敗:${e instanceof Error ? e.message : String(e)}`
+          return prev.map((r) => (r.id === rawId ? { ...r, error: msg } : r))
+        }
+      })
+      setProcessingId(null)
+    }, 30)
+  }, [])
+
+  const processAllRaw = useCallback(() => {
+    rawData.forEach((r) => processRaw(r.id))
+  }, [rawData, processRaw])
+
+  const removeRaw = useCallback((rawId: string) => setRawData((prev) => prev.filter((r) => r.id !== rawId)), [])
+
+  // Delete a source from the pool (+ its extracted audio, blobs, and any clips using it).
+  const removeSource = useCallback(
+    (sourceId: string) => {
+      const src = sources[sourceId]
+      if (!src) return
+      const ids = new Set<string>([sourceId])
+      if (src.kind === 'video' && src.linkedAudioId) ids.add(src.linkedAudioId)
+      const usedClips = project.clips.filter((c) => ids.has(c.sourceId))
+      if (usedClips.length && !window.confirm(`「${src.name}」在時間軸上有 ${usedClips.length} 個片段,要連同片段一起刪除嗎?`)) return
+      for (const did of ids) {
+        const s = sources[did]
+        if (s?.mediaUrl) URL.revokeObjectURL(s.mediaUrl)
+        mediaFiles.current.delete(did)
+      }
+      setSources((prev) => {
+        const n = { ...prev }
+        ids.forEach((did) => delete n[did])
+        return n
+      })
+      if (usedClips.length) {
+        if (selectedClipId && usedClips.some((c) => c.id === selectedClipId)) setSelectedClipId(null)
+        history.commit({ ...project, clips: project.clips.filter((c) => !ids.has(c.sourceId)) })
       }
     },
-    [history, project.tracks, project.clips],
+    [sources, project, history, selectedClipId],
+  )
+
+  // Re-link a specific missing media source to a file the user picks (no name matching).
+  const relinkSource = useCallback(async (sourceId: string, file: File) => {
+    const src = ref.sources.current[sourceId]
+    if (!src) return
+    setBusy(true)
+    try {
+      const updated: Record<string, MediaSource> = {}
+      if (src.kind === 'video') {
+        mediaFiles.current.set(src.id, file)
+        updated[src.id] = { ...src, mediaUrl: URL.createObjectURL(file), needsRelink: undefined }
+        const aud = src.linkedAudioId ? ref.sources.current[src.linkedAudioId] : undefined
+        if (aud?.needsRelink) {
+          try {
+            const { audioBuffer, waveform } = await decodeAudio(file)
+            mediaFiles.current.set(aud.id, file)
+            updated[aud.id] = { ...aud, audioBuffer, waveform, needsRelink: undefined }
+          } catch {
+            /* keep needing relink */
+          }
+        }
+      } else if (src.kind === 'audio') {
+        const { audioBuffer, waveform } = await decodeAudio(file)
+        mediaFiles.current.set(src.id, file)
+        updated[src.id] = { ...src, audioBuffer, waveform, needsRelink: undefined }
+      }
+      if (Object.keys(updated).length) setSources((prev) => ({ ...prev, ...updated }))
+    } finally {
+      setBusy(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const onRelink = useCallback((sourceId: string) => {
+    relinkTargetId.current = sourceId
+    relinkInput.current?.click()
+  }, [])
+
+  // ---------- stage ③: drag a library source onto a specific track at a time ----------
+  const [draggingKind, setDraggingKind] = useState<TrackKind | null>(null)
+
+  const dropSourceOnTrack = useCallback(
+    (sourceId: string, trackId: string, startSec: number) => {
+      const src = sources[sourceId]
+      const track = project.tracks.find((t) => t.id === trackId)
+      if (!src || !track || src.kind !== track.kind) return // only same-kind tracks
+      if ((mixer[trackId] ?? DEFAULT_MIX).locked) return
+      // a track can hold many clips (a sequence) — just snap to a free slot, no overlap
+      const start = resolveStart(project.clips.filter((c) => c.trackId === trackId), Math.max(0, startSec), src.fullDuration)
+      let tracks = project.tracks
+      const newClips: Clip[] = [{ id: id('clp'), sourceId: src.id, trackId, name: src.name, start, inPoint: 0, duration: src.fullDuration }]
+      if (src.kind === 'video' && src.linkedAudioId && sources[src.linkedAudioId]) {
+        const aud = sources[src.linkedAudioId]
+        let audTrack = tracks.find((t) => t.kind === 'audio')
+        if (!audTrack) {
+          audTrack = { id: id('trk'), kind: 'audio', name: nextTrackName('audio', tracks), color: COLORS.audio }
+          tracks = insertGrouped(tracks, audTrack)
+        }
+        const audStart = resolveStart(project.clips.filter((c) => c.trackId === audTrack!.id), start, aud.fullDuration)
+        newClips.push({ id: id('clp'), sourceId: aud.id, trackId: audTrack.id, name: aud.name, start: audStart, inPoint: 0, duration: aud.fullDuration })
+      }
+      history.commit({ tracks, clips: [...project.clips, ...newClips] })
+    },
+    [history, project, sources, mixer],
   )
 
   // ---------- mixer ----------
@@ -184,13 +380,27 @@ export default function App() {
   )
 
   // ---------- discrete edit actions ----------
-  const addAudioTrack = useCallback(() => {
-    const n = project.tracks.filter((t) => t.kind === 'audio').length + 1
-    history.commit({ ...project, tracks: [...project.tracks, { id: id('trk'), kind: 'audio', name: `Audio ${n}`, color: COLORS.audio }] })
-  }, [history, project])
+  const addTrack = useCallback(
+    (kind: TrackKind) => {
+      if (project.tracks.filter((t) => t.kind === kind).length >= MAX_PER_KIND) return
+      const trk: Track = { id: id('trk'), kind, name: nextTrackName(kind, project.tracks), color: COLORS[kind] }
+      history.commit({ ...project, tracks: insertGrouped(project.tracks, trk) })
+    },
+    [history, project],
+  )
+
+  const renameTrack = useCallback(
+    (trackId: string, name: string) => {
+      const clean = name.trim()
+      if (!clean) return
+      history.commit({ ...project, tracks: project.tracks.map((t) => (t.id === trackId ? { ...t, name: clean } : t)) })
+    },
+    [history, project],
+  )
 
   const removeTrack = useCallback(
     (trackId: string) => {
+      if (project.tracks.length <= 1) return // keep at least one track
       const removed = new Set(project.clips.filter((c) => c.trackId === trackId).map((c) => c.id))
       if (selectedClipId && removed.has(selectedClipId)) setSelectedClipId(null)
       history.commit({ tracks: project.tracks.filter((t) => t.id !== trackId), clips: project.clips.filter((c) => c.trackId !== trackId) })
@@ -284,16 +494,79 @@ export default function App() {
   const fit = useCallback((viewportWidth: number) => setPixelsPerSecond(clamp(viewportWidth / totalDuration, 6, 300)), [totalDuration])
 
   // ---------- export ----------
-  const exportWav = useCallback(async () => {
-    const blob = await renderTimelineToWav(project, sources, gains, masterVolume, totalDuration)
-    downloadBlob(blob, 'experium-mix.wav')
-  }, [project, sources, gains, masterVolume, totalDuration])
+  // Export length = video duration; fall back to the longest clip if there's no video.
+  const exportLength = useMemo(() => {
+    let vid = 0
+    let any = 0
+    for (const c of project.clips) {
+      const end = c.start + c.duration
+      if (Number.isFinite(end) && end > any) any = end
+      if (sources[c.sourceId]?.kind === 'video' && Number.isFinite(end) && end > vid) vid = end
+    }
+    return vid > 0 ? vid : any
+  }, [project.clips, sources])
 
-  const exportCsv = useCallback(async () => {
-    const text = buildTimelineCsv(project, sources)
-    if (!text) throw new Error('No CSV tracks to export')
-    downloadText(text, 'experium-timeseries.csv')
-  }, [project, sources])
+  // All exports share one length so audio / video / CSV stay co-terminous.
+  const contentLength = exportLength > 0 ? exportLength : totalDuration
+
+  // One WAV file PER selected audio track (each track isolated, at its own volume).
+  const exportWav = useCallback(
+    async (trackIds: string[]) => {
+      if (!trackIds.length) throw new Error('沒有選取任何音頻軌道')
+      let made = 0
+      for (let i = 0; i < trackIds.length; i++) {
+        const tid = trackIds[i]
+        const blob = await renderTimelineToWav(project, sources, gains, 1, contentLength, [tid])
+        const safe = (project.tracks.find((t) => t.id === tid)?.name ?? tid).replace(/[^\w.\- ]+/g, '_').trim()
+        downloadBlob(blob, `${safe || tid}.wav`)
+        made++
+        if (i < trackIds.length - 1) await new Promise((r) => setTimeout(r, 250))
+      }
+      if (!made) throw new Error('No audio on the selected tracks')
+    },
+    [project, sources, gains, contentLength],
+  )
+
+  // Audio tracks available for export (have at least one decoded audio clip).
+  const audioTrackInfo = useMemo(
+    () =>
+      project.tracks
+        .filter((t) => t.kind === 'audio' && project.clips.some((c) => c.trackId === t.id && sources[c.sourceId]?.audioBuffer))
+        .map((t) => ({ id: t.id, name: t.name })),
+    [project, sources],
+  )
+
+  // CSV tracks available for export (id, label, channel count).
+  const csvTrackInfo = useMemo(
+    () =>
+      project.tracks
+        .filter((t) => project.clips.some((c) => c.trackId === t.id && sources[c.sourceId]?.csv))
+        .map((t) => {
+          const firstClip = project.clips.find((c) => c.trackId === t.id && sources[c.sourceId]?.csv)!
+          return { id: t.id, name: t.name, channels: sources[firstClip.sourceId]!.csv!.series.length }
+        }),
+    [project, sources],
+  )
+
+  // One CSV file PER selected track (each track = one data stream, e.g. left / right hand).
+  const exportCsv = useCallback(
+    async (sampleRate: number, trackIds: string[]) => {
+      if (!trackIds.length) throw new Error('沒有選取任何 CSV 軌道')
+      if (!(exportLength > 0)) throw new Error('Cannot determine timeline length — re-import the video')
+      let made = 0
+      for (let i = 0; i < trackIds.length; i++) {
+        const tid = trackIds[i]
+        const text = buildTimelineCsv(project, sources, sampleRate, exportLength, [tid])
+        if (!text) continue
+        const safe = (project.tracks.find((t) => t.id === tid)?.name ?? tid).replace(/[^\w.\- ]+/g, '_').trim()
+        downloadText(text, `${safe || tid}.csv`)
+        made++
+        if (i < trackIds.length - 1) await new Promise((r) => setTimeout(r, 250)) // stagger so the browser allows multiple downloads
+      }
+      if (!made) throw new Error('No CSV data on the selected tracks')
+    },
+    [project, sources, exportLength],
+  )
 
   const exportVideo = useCallback(
     async (onProgress: (p: number) => void) => {
@@ -346,11 +619,11 @@ export default function App() {
       await new Promise<void>((resolve) => {
         const draw = () => {
           const t = engine.getTime()
-          if (t >= totalDuration) {
+          if (t >= contentLength) {
             resolve()
             return
           }
-          onProgress(Math.min(1, t / totalDuration))
+          onProgress(Math.min(1, t / contentLength))
           const clip = videoClips.find((c) => t >= c.start && t <= c.start + c.duration)
           cctx.fillStyle = '#000'
           cctx.fillRect(0, 0, W, H)
@@ -384,12 +657,142 @@ export default function App() {
       vids.forEach((v) => v.pause())
       downloadBlob(new Blob(chunks, { type: mime }), 'experium-export.webm')
     },
-    [project, sources, gains, masterVolume, totalDuration],
+    [project, sources, gains, masterVolume, contentLength],
+  )
+
+  // ---------- persistence (A: autosave to IndexedDB · B: .experium file) ----------
+  const buildBlobs = useCallback((): Record<string, File> => {
+    const blobs: Record<string, File> = {}
+    for (const s of Object.values(sources)) {
+      if (s.kind === 'csv') continue
+      const f = mediaFiles.current.get(s.id)
+      if (f) blobs[s.id] = f
+    }
+    return blobs
+  }, [sources])
+
+  const restoreProject = useCallback(
+    async (snap: ProjectSnapshot, media: Record<string, File>) => {
+      bumpSeq([
+        ...snap.project.tracks.map((t) => t.id),
+        ...snap.project.clips.map((c) => c.id),
+        ...snap.sources.map((s) => s.id),
+      ])
+      mediaFiles.current = new Map()
+      const next: Record<string, MediaSource> = {}
+      for (const s of snap.sources) {
+        if (s.kind === 'csv') {
+          next[s.id] = { id: s.id, kind: 'csv', name: s.name, fullDuration: s.fullDuration, csv: s.csv }
+          continue
+        }
+        const blob = media[s.id]
+        if (blob) {
+          mediaFiles.current.set(s.id, blob)
+          if (s.kind === 'video') {
+            next[s.id] = { id: s.id, kind: 'video', name: s.name, fullDuration: s.fullDuration, mediaUrl: URL.createObjectURL(blob), linkedAudioId: s.linkedAudioId }
+          } else {
+            try {
+              const { audioBuffer, waveform } = await decodeAudio(blob)
+              next[s.id] = { id: s.id, kind: 'audio', name: s.name, fullDuration: s.fullDuration, audioBuffer, waveform }
+            } catch {
+              next[s.id] = { id: s.id, kind: 'audio', name: s.name, fullDuration: s.fullDuration, needsRelink: true }
+            }
+          }
+        } else {
+          next[s.id] = { id: s.id, kind: s.kind, name: s.name, fullDuration: s.fullDuration, linkedAudioId: s.linkedAudioId, needsRelink: true }
+        }
+      }
+      setSources(next)
+      setMixer(snap.mixer ?? {})
+      if (snap.view) {
+        setPixelsPerSecond(snap.view.pixelsPerSecond)
+        setTrackHeight(snap.view.trackHeight)
+        setAmpScale(snap.view.ampScale)
+        setMasterVolume(snap.view.masterVolume)
+      }
+      setSelectedClipId(null)
+      setPlayhead(0)
+      setRawData([])
+      history.reset(snap.project)
+    },
+    [history],
+  )
+
+  // Load the last autosaved project on first mount.
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([loadSnapshot<ProjectSnapshot>(), loadMedia()])
+      .then(async ([snap, media]) => {
+        if (!cancelled && snap?.app === 'experium-editor' && (snap.project.tracks.length || snap.project.clips.length)) {
+          try {
+            await restoreProject(snap, media ?? {})
+          } catch {
+            /* ignore corrupt autosave */
+          }
+        }
+      })
+      .finally(() => !cancelled && setStorageReady(true))
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Debounced autosave: snapshot every change; media blobs only when they change.
+  useEffect(() => {
+    if (!storageReady) return
+    setSaveStatus('saving')
+    const t = setTimeout(async () => {
+      try {
+        const snap = serializeProject({
+          project,
+          mixer,
+          sources,
+          view: { pixelsPerSecond, trackHeight, ampScale, masterVolume },
+          savedAt: new Date().toISOString(),
+        })
+        await saveSnapshot(snap)
+        const blobs = buildBlobs()
+        const sig = Object.keys(blobs).sort().join('|')
+        if (sig !== lastMediaSig.current) {
+          await saveMedia(blobs)
+          lastMediaSig.current = sig
+        }
+        setSaveStatus('saved')
+      } catch {
+        setSaveStatus('idle')
+      }
+    }, 700)
+    return () => clearTimeout(t)
+  }, [storageReady, project, mixer, sources, pixelsPerSecond, trackHeight, ampScale, masterVolume, buildBlobs])
+
+  const saveProjectFile = useCallback(() => {
+    const snap = serializeProject({
+      project,
+      mixer,
+      sources,
+      view: { pixelsPerSecond, trackHeight, ampScale, masterVolume },
+      savedAt: new Date().toISOString(),
+    })
+    downloadText(JSON.stringify(snap), 'experium-project.experium', 'application/json')
+  }, [project, mixer, sources, pixelsPerSecond, trackHeight, ampScale, masterVolume])
+
+  const openProjectFile = useCallback(
+    async (file: File) => {
+      try {
+        const snap = parseProjectFile(await file.text())
+        await restoreProject(snap, {})
+        lastMediaSig.current = '' // force a media re-save once relinked
+      } catch (e) {
+        alert(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [restoreProject],
   )
 
   // ---------- transport ----------
   const seek = useCallback((t: number) => {
-    const clamped = Math.max(0, t)
+    const clamped = Math.max(0, Math.min(t, ref.total.current))
     setPlayhead(clamped)
     if (ref.playing.current && engineRef.current) {
       engineRef.current.play(clamped, ref.project.current, ref.sources.current, ref.gains.current, ref.master.current)
@@ -401,7 +804,13 @@ export default function App() {
   useEffect(() => {
     if (!isPlaying) return
     const engine = getEngine()
-    engine.play(ref.playhead.current, ref.project.current, ref.sources.current, ref.gains.current, ref.master.current)
+    // If we're parked at the end, pressing play restarts from the top.
+    let startAt = ref.playhead.current
+    if (startAt >= ref.total.current - 1e-3) {
+      startAt = 0
+      setPlayhead(0)
+    }
+    engine.play(startAt, ref.project.current, ref.sources.current, ref.gains.current, ref.master.current)
     let raf = 0
     const tick = () => {
       const t = engine.getTime()
@@ -414,7 +823,7 @@ export default function App() {
           setIsPlaying(false)
           return
         }
-      } else setPlayhead(t)
+      } else setPlayhead(Math.min(t, ref.total.current))
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
@@ -425,10 +834,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying])
 
-  // Live mixer / master changes while playing.
+  // Keep the playhead inside [0, totalDuration] when edits/undo shrink the timeline.
   useEffect(() => {
-    engineRef.current?.applyTrackGains(gains)
-  }, [gains])
+    setPlayhead((p) => (p > totalDuration ? totalDuration : p))
+  }, [totalDuration])
+
+  // Live mixer / master / volume-automation changes while playing.
+  useEffect(() => {
+    engineRef.current?.applyMix(project.tracks, gains)
+  }, [gains, project.tracks])
   useEffect(() => {
     engineRef.current?.setMasterVolume(masterVolume)
   }, [masterVolume])
@@ -512,14 +926,19 @@ export default function App() {
     const src = sources[c.sourceId]
     return src?.kind === 'video' && playhead >= c.start && playhead <= c.start + c.duration
   })
+  const videoCovered = !!videoClip
   let videoUrl: string | undefined
   let videoTime: number | null = null
   if (videoClip) {
     videoUrl = sources[videoClip.sourceId]?.mediaUrl
     videoTime = videoClip.inPoint + (playhead - videoClip.start)
   } else {
+    // Keep an element mounted (avoids reload flicker) but the preview shows black —
+    // there is no video at this playhead position.
     videoUrl = Object.values(sources).find((s) => s.kind === 'video' && s.mediaUrl)?.mediaUrl
   }
+
+  const onTimelineSourceIds = new Set(project.clips.map((c) => c.sourceId))
 
   const selectedClip = project.clips.find((c) => c.id === selectedClipId) ?? null
   const selectedSource = selectedClip ? sources[selectedClip.sourceId] ?? null : null
@@ -544,13 +963,62 @@ export default function App() {
           e.target.value = ''
         }}
       />
-      <TopBar busy={busy} onImport={() => fileInput.current?.click()} onExport={() => setExportOpen(true)} onUndo={history.undo} onRedo={history.redo} canUndo={history.canUndo} canRedo={history.canRedo} />
+      <input
+        ref={projectInput}
+        type="file"
+        accept=".experium,application/json"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          if (e.target.files?.[0]) openProjectFile(e.target.files[0])
+          e.target.value = ''
+        }}
+      />
+      <input
+        ref={relinkInput}
+        type="file"
+        accept="video/*,audio/*"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f && relinkTargetId.current) relinkSource(relinkTargetId.current, f)
+          relinkTargetId.current = null
+          e.target.value = ''
+        }}
+      />
+      <TopBar
+        busy={busy}
+        saveStatus={saveStatus}
+        onImport={() => fileInput.current?.click()}
+        onExport={() => setExportOpen(true)}
+        onSaveProject={saveProjectFile}
+        onOpenProject={() => projectInput.current?.click()}
+        onUndo={history.undo}
+        onRedo={history.redo}
+        canUndo={history.canUndo}
+        canRedo={history.canRedo}
+      />
       <div className="app__body">
-        <MediaBin width={mediaWidth} sources={Object.values(sources)} onImport={() => fileInput.current?.click()} onImportFiles={importFiles} />
+        <LibraryPanel
+          width={mediaWidth}
+          rawData={rawData}
+          librarySources={Object.values(sources)}
+          onTimelineSourceIds={onTimelineSourceIds}
+          processingId={processingId}
+          onImport={() => fileInput.current?.click()}
+          onImportFiles={importFiles}
+          onProcess={processRaw}
+          onProcessAll={processAllRaw}
+          onRemoveRaw={removeRaw}
+          onRemoveSource={removeSource}
+          onRelink={onRelink}
+          onDragSourceStart={setDraggingKind}
+          onDragSourceEnd={() => setDraggingKind(null)}
+        />
         <ResizeHandle axis="x" onDelta={(d) => setMediaWidth((w) => clamp(w + d, 180, 480))} />
         <main className="app__center">
           <Preview
             videoUrl={videoUrl}
+            videoCovered={videoCovered}
             videoTime={videoTime}
             isPlaying={isPlaying}
             loop={loop}
@@ -583,10 +1051,14 @@ export default function App() {
               setTool={setTool}
               setSnap={setSnap}
               onSelectClip={setSelectedClipId}
-              onScrub={setPlayhead}
+              onScrub={(t) => setPlayhead(Math.max(0, Math.min(t, totalDuration)))}
               onSeek={seek}
               onSetTrackMix={setTrackMix}
-              onAddAudioTrack={addAudioTrack}
+              onAddTrack={addTrack}
+              maxPerKind={MAX_PER_KIND}
+              draggingKind={draggingKind}
+              onDropSource={dropSourceOnTrack}
+              onRenameTrack={renameTrack}
               onRemoveTrack={removeTrack}
               onSplitAt={splitClipAt}
               onSplitAtPlayhead={splitAtPlayhead}
@@ -608,6 +1080,8 @@ export default function App() {
           hasAudio={project.clips.some((c) => sources[c.sourceId]?.audioBuffer)}
           hasCsv={project.clips.some((c) => sources[c.sourceId]?.csv)}
           hasVideo={project.clips.some((c) => sources[c.sourceId]?.kind === 'video')}
+          csvTracks={csvTrackInfo}
+          audioTracks={audioTrackInfo}
           onExportWav={exportWav}
           onExportCsv={exportCsv}
           onExportVideo={exportVideo}

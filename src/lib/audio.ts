@@ -56,13 +56,48 @@ export async function decodeAudio(
   }
 }
 
-/** Read a media file's duration via a throwaway media element. */
+/**
+ * Read a media file's duration via a throwaway media element.
+ * Blob/streamed mp4 & webm often report `Infinity` until forced to seek to the
+ * end, so we nudge currentTime past the end and wait for the real duration.
+ * Always resolves a finite, non-negative number (0 if truly unknown).
+ */
 export function getMediaDuration(url: string, kind: 'video' | 'audio'): Promise<number> {
   return new Promise((resolve) => {
     const el = document.createElement(kind)
     el.preload = 'metadata'
-    el.onloadedmetadata = () => resolve(isFinite(el.duration) ? el.duration : 0)
-    el.onerror = () => resolve(0)
+    let settled = false
+    let timer = 0
+    const check = () => {
+      if (Number.isFinite(el.duration) && el.duration > 0) finish(el.duration)
+    }
+    const finish = (d: number) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      el.removeEventListener('durationchange', check)
+      el.removeEventListener('seeked', check)
+      try {
+        el.removeAttribute('src')
+        el.load()
+      } catch {
+        /* noop */
+      }
+      resolve(Number.isFinite(d) && d > 0 ? d : 0)
+    }
+    el.onloadedmetadata = () => {
+      if (el.duration === Infinity || Number.isNaN(el.duration) || el.duration === 0) {
+        el.addEventListener('durationchange', check)
+        el.addEventListener('seeked', check)
+        try {
+          el.currentTime = 1e7 // force the browser to resolve the true duration
+        } catch {
+          /* noop */
+        }
+      } else finish(el.duration)
+    }
+    el.onerror = () => finish(0)
+    timer = window.setTimeout(() => finish(el.duration), 5000) // never hang the import
     el.src = url
   })
 }

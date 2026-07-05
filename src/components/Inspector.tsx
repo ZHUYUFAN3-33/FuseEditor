@@ -59,6 +59,7 @@ export default function Inspector({ width, clip, source, csvReadout, playhead }:
           {source.csv && !csvReadout && (
             <p className="inspector__small">Move the playhead over this clip to read values.</p>
           )}
+
           {source.waveform && (
             <div className="inspector__meta">
               <p className="inspector__label">Waveform</p>
