@@ -6,6 +6,7 @@ interface Props {
   clip: Clip | null
   source: MediaSource | null
   csvReadout: { name: string; value: number | null }[] | null
+  csvEnvGain: number | null // envelope × fade multiplier at the playhead (null = nothing applied)
   playhead: number
 }
 
@@ -15,7 +16,7 @@ const KIND_LABEL: Record<MediaSource['kind'], string> = {
   csv: 'CSV / time series',
 }
 
-export default function Inspector({ width, clip, source, csvReadout, playhead }: Props) {
+export default function Inspector({ width, clip, source, csvReadout, csvEnvGain, playhead }: Props) {
   return (
     <aside className="inspector panel" style={{ width, flexShrink: 0 }}>
       <div className="panel__header">Inspector</div>
@@ -45,7 +46,14 @@ export default function Inspector({ width, clip, source, csvReadout, playhead }:
 
           {csvReadout && (
             <div className="inspector__meta">
-              <p className="inspector__label">Value @ playhead</p>
+              <p className="inspector__label" title="Data × track envelope × clip fades — exactly what the exported CSV contains">
+                Output @ playhead
+              </p>
+              {csvEnvGain != null && (
+                <p className="inspector__small inspector__envnote">
+                  ◆ envelope ×{csvEnvGain.toFixed(2)} applied — open the track's ◆ lane to edit / clear it
+                </p>
+              )}
               <ul className="inspector__serieslist">
                 {csvReadout.map((r) => (
                   <li key={r.name}>

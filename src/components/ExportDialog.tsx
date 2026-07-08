@@ -14,6 +14,7 @@ interface Props {
   hasAudio: boolean
   hasCsv: boolean
   hasVideo: boolean
+  exportLength: number
   csvTracks: CsvTrack[]
   audioTracks: AudioTrack[]
   onExportWav: (trackIds: string[]) => Promise<void>
@@ -24,7 +25,7 @@ interface Props {
 
 type Status = { kind: 'idle' | 'running' | 'done' | 'error'; msg?: string; progress?: number }
 
-export default function ExportDialog({ hasAudio, hasCsv, hasVideo, csvTracks, audioTracks, onExportWav, onExportCsv, onExportVideo, onClose }: Props) {
+export default function ExportDialog({ hasAudio, hasCsv, hasVideo, exportLength, csvTracks, audioTracks, onExportWav, onExportCsv, onExportVideo, onClose }: Props) {
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
   const [csvRate, setCsvRate] = useState(60)
   const [picked, setPicked] = useState<Set<string>>(() => new Set(csvTracks.map((t) => t.id)))
@@ -93,7 +94,10 @@ export default function ExportDialog({ hasAudio, hasCsv, hasVideo, csvTracks, au
           <span className="export__icon">📈</span>
           <span>
             <b>Time series — CSV <em>(one file per track)</em></b>
-            <small>Each selected track → its own .csv, aligned to video length, gaps = 0.</small>
+            <small>
+              Each track → its own .csv, {exportLength.toFixed(1)}s @ {csvRate}Hz ≈{' '}
+              {Math.floor(exportLength * csvRate) + 1} rows. Gaps (no clip) = 0.
+            </small>
           </span>
         </button>
         {hasCsv && (

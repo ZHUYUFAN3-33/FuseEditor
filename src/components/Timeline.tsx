@@ -3,7 +3,9 @@ import type { Clip as ClipT, MediaSource, Project, TrackKind, TrackMix } from '.
 import type { Tool } from './Clip'
 import Clip from './Clip'
 import IntensityLane from './IntensityLane'
-import type { Keyframe } from '../types'
+import type { LaneMode } from './IntensityLane'
+import type { Keyframe, Interp } from '../types'
+import { PRESETS, type PresetId } from '../lib/envelope'
 import { middleEllipsis, fmtTime } from '../lib/format'
 import { resolveStart } from '../lib/clips'
 
@@ -62,7 +64,7 @@ export default function Timeline(props: Props) {
     sourcesById,
     getMix,
     totalDuration,
-    pixelsPerSecond: pps,
+    pixelsPerSecond: rawPps,
     trackHeight,
     ampScale,
     playhead,
@@ -81,8 +83,28 @@ export default function Timeline(props: Props) {
       n.has(id) ? n.delete(id) : n.add(id)
       return n
     })
+  // envelope-editor toolbar state (shared by whichever intensity lanes are open)
+  const [envMode, setEnvMode] = useState<LaneMode>('point')
+  const [envInterp, setEnvInterp] = useState<Interp>('linear')
+  const [envSnap, setEnvSnap] = useState(false)
+  const [armedPreset, setArmedPreset] = useState<PresetId | null>(null)
+  // Horizontal scroll offset + visible width — the intensity lanes render ONLY this slice,
+  // so their SVG is always ~one screen wide (never the whole timeline). That keeps envelope
+  // dragging cheap and avoids the huge-layer render stall (black screen) at high zoom.
+  const [scrollX, setScrollX] = useState(0)
+  const [viewW, setViewW] = useState(1000)
   const setIntensity = (trackId: string, kf: Keyframe[]) =>
     props.liveProject({ ...project, tracks: project.tracks.map((t) => (t.id === trackId ? { ...t, intensity: kf } : t)) })
+
+  // Apply an edit fn to the intensity of every track whose lane is open (one undo step).
+  const editOpenLanes = (fn: (kf: Keyframe[]) => Keyframe[]) => {
+    props.beginGesture()
+    props.liveProject({
+      ...project,
+      tracks: project.tracks.map((t) => (intensityTracks.has(t.id) ? { ...t, intensity: fn(t.intensity ?? []) } : t)),
+    })
+    props.endGesture()
+  }
   const gesture = useRef<null | {
     kind: 'move' | 'trim-l' | 'trim-r' | 'fade-l' | 'fade-r'
     base: ClipT
@@ -92,6 +114,13 @@ export default function Timeline(props: Props) {
   }>(null)
   const scrub = useRef<null | { rectLeft: number }>(null)
 
+  // Generous content-width cap. The two things that used to render BLACK when too wide are now
+  // both bounded regardless of zoom: clip canvases are backing-capped at 8192, and the intensity
+  // lane SVG is virtualized to one screen wide. Plain clip/ruler divs just tile, so we can allow
+  // much deeper zoom now — this cap is only a sanity backstop.
+  const MAX_CONTENT = 40000
+  const maxPps = Math.max(6, Math.floor(MAX_CONTENT / Math.max(1, totalDuration)))
+  const pps = Math.min(rawPps, maxPps)
   const contentWidth = totalDuration * pps
   const step = rulerStep(pps)
   const marks: number[] = []
@@ -109,10 +138,18 @@ export default function Timeline(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playhead])
 
+  // Track the viewport width so the intensity lanes know how wide a slice to render.
+  useEffect(() => {
+    const measure = () => scrollRef.current && setViewW(scrollRef.current.clientWidth)
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [])
+
   // Zoom anchored on the playhead: the red line keeps its place in the viewport while
   // the content scales around it.
   function applyZoom(target: number) {
-    const next = Math.min(300, Math.max(6, target))
+    const next = Math.min(maxPps, Math.max(6, target))
     const el = scrollRef.current
     if (!el) {
       props.setPixelsPerSecond(next)
@@ -347,11 +384,16 @@ export default function Timeline(props: Props) {
 
         <div className="timeline__spacer" />
 
-        <label className="zoom">
-          ↔
-          <input type="range" min={6} max={300} value={pps} onChange={(e) => applyZoom(Number(e.target.value))} />
+        <div className="zoom" title="Horizontal zoom (time scale)">
+          <button className="tool" title="Zoom out (–)" onClick={() => applyZoom(pps / 1.4)}>
+            －
+          </button>
+          <input type="range" min={6} max={maxPps} value={pps} onChange={(e) => applyZoom(Number(e.target.value))} />
+          <button className="tool" title="Zoom in (+)" onClick={() => applyZoom(pps * 1.4)}>
+            ＋
+          </button>
           <span className="zoom__val">{Math.round(pps)}px/s</span>
-        </label>
+        </div>
         <label className="zoom">
           ↕
           <input type="range" min={44} max={220} value={trackHeight} onChange={(e) => props.setTrackHeight(Number(e.target.value))} />
@@ -363,7 +405,63 @@ export default function Timeline(props: Props) {
         </label>
       </div>
 
-      <div className="timeline__scroll" ref={scrollRef} onWheel={onWheel}>
+      {intensityTracks.size > 0 && (
+        <div className="envbar">
+          <span className="envbar__label">◆ Envelope</span>
+          <div className="toolgroup">
+            {([
+              ['point', '✎ Point', 'Point — click to add, drag to move, double-click a point to delete'],
+              ['pencil', '〜 Draw', 'Draw — freehand-sketch the curve; it simplifies to points'],
+              ['erase', '⌫ Erase', 'Erase — click or drag over points to delete them'],
+            ] as [LaneMode, string, string][]).map(([m, label, tip]) => (
+              <button key={m} className={'tool' + (envMode === m ? ' tool--on' : '')} title={tip} onClick={() => setEnvMode(m)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="toolgroup" title="Curve of new points (right-click a point to change it later)">
+            {([
+              ['linear', 'Lin'],
+              ['smooth', 'Curve'],
+              ['hold', 'Hold'],
+            ] as [Interp, string][]).map(([it, label]) => (
+              <button key={it} className={'tool' + (envInterp === it ? ' tool--on' : '')} onClick={() => setEnvInterp(it)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <button className={'tool' + (envSnap ? ' tool--on' : '')} title="Snap keyframes to a grid" onClick={() => setEnvSnap(!envSnap)}>
+            🧲 Snap
+          </button>
+          <button className="tool" title="Clear the whole envelope on the open lane(s)" onClick={() => editOpenLanes(() => [])}>
+            🗑 Clear
+          </button>
+          <div className="envbar__spacer" />
+          <span className="envbar__label">Stamp:</span>
+          <div className="toolgroup">
+            {PRESETS.map((p) => (
+              <button
+                key={p.id}
+                className={'tool' + (armedPreset === p.id ? ' tool--armed' : '')}
+                title={`Arm "${p.label}" — then click the lane to place it`}
+                onClick={() => setArmedPreset(armedPreset === p.id ? null : (p.id as PresetId))}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div
+        className="timeline__scroll"
+        ref={scrollRef}
+        onWheel={onWheel}
+        onScroll={(e) => {
+          setScrollX(e.currentTarget.scrollLeft)
+          setViewW(e.currentTarget.clientWidth)
+        }}
+      >
         <div className="timeline__inner" style={{ width: HEAD_WIDTH + contentWidth }}>
           <div className="timeline__ruler">
             <div className="timeline__gutter" style={{ width: HEAD_WIDTH }} />
@@ -440,10 +538,16 @@ export default function Timeline(props: Props) {
                     )}
                     {(track.kind === 'csv' || track.kind === 'audio') && (
                       <button
-                        className={'tbtn' + (intensityTracks.has(track.id) ? ' tbtn--on' : '')}
+                        className={
+                          'tbtn' +
+                          (intensityTracks.has(track.id) ? ' tbtn--on' : track.intensity?.length ? ' tbtn--env' : '')
+                        }
                         title={
+                          (track.intensity?.length
+                            ? `ENVELOPE ACTIVE (${track.intensity.length} keyframes) — it scales this track's data/volume everywhere, even while this lane is closed. `
+                            : '') +
                           (track.kind === 'audio' ? 'Volume' : 'Intensity') +
-                          ' keyframes (click lane to add, drag to move, double-click to remove)'
+                          ' envelope (open to edit / clear)'
                         }
                         onClick={() => toggleIntensity(track.id)}
                       >
@@ -505,12 +609,19 @@ export default function Timeline(props: Props) {
                   {(track.kind === 'csv' || track.kind === 'audio') && intensityTracks.has(track.id) && (
                     <IntensityLane
                       keyframes={track.intensity ?? []}
-                      width={contentWidth}
+                      viewLeft={scrollX}
+                      viewWidth={Math.max(200, viewW - HEAD_WIDTH)}
                       height={trackHeight}
                       pps={pps}
                       totalDuration={totalDuration}
                       maxValue={track.kind === 'audio' ? 3 : 1}
-                      unitLabel={track.kind === 'audio' ? 'volume (up to 3×)' : 'intensity 100%'}
+                      neutral={track.kind === 'audio' ? 1 : 0.5}
+                      unitLabel={track.kind === 'audio' ? 'volume (up to 3×)' : 'intensity'}
+                      mode={envMode}
+                      defaultInterp={envInterp}
+                      snap={envSnap}
+                      armedPreset={armedPreset}
+                      onConsumePreset={() => setArmedPreset(null)}
                       onBegin={props.beginGesture}
                       onLive={(kf) => setIntensity(track.id, kf)}
                       onEnd={props.endGesture}

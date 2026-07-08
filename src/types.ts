@@ -69,10 +69,14 @@ export interface Clip {
   fadeOut?: number // fade-out ramp (s) to the clip's end
 }
 
+/** How the segment to the RIGHT of a keyframe is interpolated. Absent ⇒ 'linear'. */
+export type Interp = 'linear' | 'smooth' | 'hold'
+
 /** One point on a track's intensity (0..1) automation curve, in timeline seconds. */
 export interface Keyframe {
   t: number
   v: number
+  interp?: Interp // interpolation of the segment to the next keyframe; undefined = 'linear'
 }
 
 export interface Track {

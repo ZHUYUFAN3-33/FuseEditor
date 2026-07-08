@@ -248,20 +248,68 @@ function validSgParams(nRows: number, w: number, p: number): { w: number; p: num
   return { w, p }
 }
 
-// ---------- top-level: process one raw FMG CSV ----------
+// ---------- already-processed CSV: load directly, NO processing ----------
 
-export function processFmgCsv(text: string): ProcessResult {
-  const raw = loadAndAlign(text)
-  const resampled = resample(raw.timeSeconds, raw.channels, PROCESS_PARAMS.FMG_TARGET_RATE)
-  let channels = normalize(resampled.channels)
+/**
+ * True if `text` looks like an already-processed file ([timestamp, chan1..N] where
+ * `timestamp` is a plain float seconds — NOT a raw file with t_mono / datetime).
+ */
+export function isProcessedCsv(text: string): boolean {
+  const lines = text.replace(/^﻿/, '').trim().split(/\r?\n/)
+  if (lines.length < 2) return false
+  const header = splitRow(lines[0])
+  if (header[0] === 't_mono') return false // raw t_mono format
+  if (header[0] !== 'timestamp') return false
+  const first = splitRow(lines[1])[0]
+  // raw "old" format has a datetime here (e.g. 2026-07-06 21:25:03.8); processed has "0.0166..."
+  if (/[-T: ]/.test(first)) return false
+  return isFinite(parseFloat(first))
+}
 
-  const sg = validSgParams(resampled.t.length, PROCESS_PARAMS.SG_WINDOW, PROCESS_PARAMS.SG_POLY)
-  if (sg) channels = channels.map((ch) => savgolFilter(ch, sg.w, sg.p))
+/** Parse an already-processed [timestamp, chan1..N] CSV straight into CsvData (no resample/normalize/SG). */
+export function parseProcessedCsv(text: string): CsvData {
+  const lines = text.replace(/^﻿/, '').trim().split(/\r?\n/)
+  if (lines.length < 2) throw new CsvFormatError('格式有問題:檔案沒有資料列')
+  const header = splitRow(lines[0])
+  if (header[0] !== 'timestamp') throw new CsvFormatError("格式有問題:已處理檔第一欄應為 'timestamp'")
+  const names = header.slice(1)
+  if (!names.length) throw new CsvFormatError('格式有問題:timestamp 後面沒有任何 channel 欄位')
 
-  const t = resampled.t
-  const names = raw.channelNames
+  const t: number[] = []
+  const cols: number[][] = names.map(() => [])
+  for (let r = 1; r < lines.length; r++) {
+    if (!lines[r].trim()) continue
+    const cells = splitRow(lines[r])
+    const tv = parseFloat(cells[0])
+    if (!isFinite(tv)) throw new CsvFormatError(`格式有問題:第 ${r + 1} 列的 timestamp 無法解析`)
+    t.push(tv)
+    for (let c = 0; c < names.length; c++) {
+      const v = parseFloat(cells[1 + c])
+      cols[c].push(isFinite(v) ? v : 0)
+    }
+  }
+  if (t.length < 2) throw new CsvFormatError('格式有問題:有效資料列不足(至少需要 2 列)')
 
-  // build processed CSV text
+  const series: Series[] = names.map((name, c) => {
+    let mn = Infinity
+    let mx = -Infinity
+    for (const v of cols[c]) {
+      if (v < mn) mn = v
+      if (v > mx) mx = v
+    }
+    return {
+      name,
+      points: t.map((tv, i) => ({ t: tv, v: cols[c][i] })),
+      min: isFinite(mn) ? mn : 0,
+      max: isFinite(mx) ? mx : 1,
+    }
+  })
+  return { duration: t[t.length - 1], series, timeColumn: 'timestamp' }
+}
+
+// ---------- shared: assemble a ProcessResult from a resampled grid ----------
+
+function buildResult(t: number[], channels: number[][], names: string[]): ProcessResult {
   const header = ['timestamp', ...names].join(',')
   const lines = [header]
   for (let i = 0; i < t.length; i++) {
@@ -269,8 +317,6 @@ export function processFmgCsv(text: string): ProcessResult {
     for (let c = 0; c < channels.length; c++) row.push(channels[c][i].toFixed(6))
     lines.push(row.join(','))
   }
-
-  // build CsvData for the editor
   const series: Series[] = names.map((name, c) => {
     const pts = t.map((tv, i) => ({ t: tv, v: channels[c][i] }))
     let mn = Infinity
@@ -281,11 +327,57 @@ export function processFmgCsv(text: string): ProcessResult {
     }
     return { name, points: pts, min: isFinite(mn) ? mn : 0, max: isFinite(mx) ? mx : 1 }
   })
-
   return {
     csvText: lines.join('\n'),
     data: { duration: t.length ? t[t.length - 1] : 0, series, timeColumn: 'timestamp' },
     rows: t.length,
     channels: channels.length,
   }
+}
+
+/** True if every channel is constant — a neutral "carrier" (e.g. all-ones) rather than real FMG. */
+export function isConstantCarrier(text: string): boolean {
+  try {
+    const raw = loadAndAlign(text)
+    if (!raw.channels.length) return false
+    return raw.channels.every((ch) => ch.every((v) => Math.abs(v - ch[0]) < 1e-9))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Load a constant "carrier" CSV (e.g. an all-ones editing template) at the target rate
+ * WITHOUT normalize/Savitzky-Golay — those would collapse a constant column to 0 and
+ * destroy the base the envelope multiplies. Real FMG never hits this path.
+ */
+export function loadCarrierCsv(text: string): ProcessResult {
+  const raw = loadAndAlign(text)
+  const resampled = resample(raw.timeSeconds, raw.channels, PROCESS_PARAMS.FMG_TARGET_RATE)
+  return buildResult(resampled.t, resampled.channels, raw.channelNames)
+}
+
+// ---------- top-level: process one raw FMG CSV ----------
+
+export function processFmgCsv(text: string): ProcessResult {
+  const raw = loadAndAlign(text)
+  const resampled = resample(raw.timeSeconds, raw.channels, PROCESS_PARAMS.FMG_TARGET_RATE)
+  let channels = normalize(resampled.channels)
+
+  const sg = validSgParams(resampled.t.length, PROCESS_PARAMS.SG_WINDOW, PROCESS_PARAMS.SG_POLY)
+  if (sg) channels = channels.map((ch) => savgolFilter(ch, sg.w, sg.p))
+
+  return buildResult(resampled.t, channels, raw.channelNames)
+}
+
+/** Generate a processed-format neutral carrier: `count` seconds of all-ones at the target rate. */
+export function makeCarrierCsv(seconds: number, channels = 16): string {
+  const rate = PROCESS_PARAMS.FMG_TARGET_RATE
+  const step = 1 / rate
+  const rows = Math.max(1, Math.round(seconds * rate))
+  const names = Array.from({ length: channels }, (_, i) => `chan${i + 1}`)
+  const lines = ['timestamp,' + names.join(',')]
+  const ones = names.map(() => '1').join(',')
+  for (let i = 0; i < rows; i++) lines.push((i * step).toFixed(6) + ',' + ones)
+  return lines.join('\n')
 }

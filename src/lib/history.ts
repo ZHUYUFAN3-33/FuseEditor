@@ -59,6 +59,7 @@ function reducer<T>(state: HState<T>, action: HAction<T>): HState<T> {
 
 export interface History<T> {
   state: T
+  gesturing: boolean // true between beginGesture and endGesture (a live drag is in progress)
   commit: (next: T) => void
   live: (next: T) => void
   reset: (next: T) => void
@@ -89,6 +90,7 @@ export function useHistory<T>(initial: T): History<T> {
   return useMemo(
     () => ({
       state: s.present,
+      gesturing: s.baseline !== null,
       commit,
       live,
       reset,
@@ -99,6 +101,6 @@ export function useHistory<T>(initial: T): History<T> {
       canUndo: s.past.length > 0,
       canRedo: s.future.length > 0,
     }),
-    [s.present, s.past.length, s.future.length, commit, live, reset, beginGesture, endGesture, undo, redo],
+    [s.present, s.baseline, s.past.length, s.future.length, commit, live, reset, beginGesture, endGesture, undo, redo],
   )
 }

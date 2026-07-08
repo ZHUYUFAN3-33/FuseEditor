@@ -21,12 +21,23 @@ export default function SeriesCanvas({ csv, inPoint, duration, width, height, am
   useEffect(() => {
     const canvas = ref.current
     if (!canvas || width <= 0 || height <= 0) return
+    // A constant carrier (e.g. all-ones) draws nothing — keep the canvas tiny so it costs nothing
+    // to re-run this effect on every envelope-drag frame (no 8192px realloc = no drag stall).
+    if (!csv.series.some((s) => s.max - s.min >= 1e-9)) {
+      canvas.width = 1
+      canvas.height = 1
+      return
+    }
     const dpr = window.devicePixelRatio || 1
-    canvas.width = Math.max(1, Math.floor(width * dpr))
-    canvas.height = Math.max(1, Math.floor(height * dpr))
+    // cap the backing store well under the GPU limit — a too-large texture renders blank/black
+    const MAX = 8192
+    const bw = Math.min(Math.max(1, Math.floor(width * dpr)), MAX)
+    const bh = Math.min(Math.max(1, Math.floor(height * dpr)), MAX)
+    canvas.width = bw
+    canvas.height = bh
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.setTransform(bw / width, 0, 0, bh / height, 0, 0) // x-scale drops below dpr at extreme zoom
     ctx.clearRect(0, 0, width, height)
 
     const pad = 4
@@ -36,6 +47,10 @@ export default function SeriesCanvas({ csv, inPoint, duration, width, height, am
     const hasAuto = automation != null && automation.length > 0
 
     csv.series.forEach((s, idx) => {
+      // Constant channel (e.g. an all-ones carrier): its "waveform" carries no info and,
+      // scaled by the envelope, would draw an inverted line that reads backwards. Skip it —
+      // the intensity lane above is the real preview.
+      if (s.max - s.min < 1e-9) return
       ctx.strokeStyle = LINE_COLORS[idx % LINE_COLORS.length]
       ctx.lineWidth = 1.5
       ctx.beginPath()
@@ -48,8 +63,10 @@ export default function SeriesCanvas({ csv, inPoint, duration, width, height, am
         const norm = (p.v - s.min) / range
         // scale amplitude by the intensity automation at this point (live feedback)
         const g = hasAuto ? intensityAt(automation, clipStart + (p.t - winStart)) : 1
-        const centered = (norm - 0.5) * ampScale * g + 0.5
-        const y = pad + (1 - centered) * plotH
+        // FMG force is unipolar: 0 (no force) sits at the BOTTOM, 1 (max) at the top, so height =
+        // force. Amplitude scales UP from the baseline (not around the middle like an audio wave).
+        const scaled = Math.max(0, Math.min(1, norm * ampScale * g))
+        const y = pad + (1 - scaled) * plotH
         if (!started) {
           ctx.moveTo(x, y)
           started = true

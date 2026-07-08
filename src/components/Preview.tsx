@@ -10,10 +10,12 @@ interface Props {
   masterVolume: number
   playhead: number
   totalDuration: number
+  frameRate: number
   onTogglePlay: () => void
   onSeek: (t: number) => void
   onToggleLoop: () => void
   onMasterVolume: (v: number) => void
+  onFrameRate: (fps: number) => void
 }
 
 export default function Preview({
@@ -25,10 +27,12 @@ export default function Preview({
   masterVolume,
   playhead,
   totalDuration,
+  frameRate,
   onTogglePlay,
   onSeek,
   onToggleLoop,
   onMasterVolume,
+  onFrameRate,
 }: Props) {
   const ref = useRef<HTMLVideoElement>(null)
 
@@ -73,8 +77,22 @@ export default function Preview({
         <button className="transport__btn" title="Go to start (Home)" onClick={() => onSeek(0)}>
           ⏮
         </button>
+        <button
+          className="transport__btn"
+          title={`Previous frame (1/${frameRate} s)`}
+          onClick={() => onSeek(Math.max(0, playhead - 1 / frameRate))}
+        >
+          ◁
+        </button>
         <button className="transport__btn transport__btn--play" onClick={onTogglePlay} title="Play / Pause (Space)">
           {isPlaying ? '⏸' : '▶'}
+        </button>
+        <button
+          className="transport__btn"
+          title={`Next frame (1/${frameRate} s)`}
+          onClick={() => onSeek(Math.min(totalDuration, playhead + 1 / frameRate))}
+        >
+          ▷
         </button>
         <button className="transport__btn" title="Go to end (End)" onClick={() => onSeek(totalDuration)}>
           ⏭
@@ -89,6 +107,16 @@ export default function Preview({
         <span className="transport__time">
           {fmtTime(playhead, true)} / {fmtTime(totalDuration, true)}
         </span>
+        <label className="transport__fps" title="Frame rate used by the ◁ ▷ step buttons (match your video)">
+          <input
+            type="number"
+            min={1}
+            max={240}
+            value={frameRate}
+            onChange={(e) => onFrameRate(Math.max(1, Math.min(240, Math.round(Number(e.target.value)) || 60)))}
+          />
+          fps
+        </label>
       </div>
     </section>
   )

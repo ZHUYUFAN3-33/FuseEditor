@@ -11,11 +11,13 @@ interface Props {
   processingId: string | null
   onImport: () => void
   onImportFiles: (files: FileList) => void
+  onNewCarrier: () => void
   onProcess: (rawId: string) => void
   onProcessAll: () => void
   onRemoveRaw: (rawId: string) => void
   onRemoveSource: (sourceId: string) => void
   onRelink: (sourceId: string) => void
+  onRelinkAll: () => void
   onDragSourceStart: (kind: MediaSource['kind']) => void
   onDragSourceEnd: () => void
 }
@@ -30,11 +32,13 @@ export default function LibraryPanel({
   processingId,
   onImport,
   onImportFiles,
+  onNewCarrier,
   onProcess,
   onProcessAll,
   onRemoveRaw,
   onRemoveSource,
   onRelink,
+  onRelinkAll,
   onDragSourceStart,
   onDragSourceEnd,
 }: Props) {
@@ -50,6 +54,7 @@ export default function LibraryPanel({
     ['csv', '📈'],
   ]
   const count = (k: 'all' | MediaSource['kind']) => (k === 'all' ? ready.length : ready.filter((s) => s.kind === k).length)
+  const relinkCount = ready.filter((s) => s.needsRelink).length
 
   return (
     <aside className="library panel" style={{ width, flexShrink: 0 }}>
@@ -74,6 +79,16 @@ export default function LibraryPanel({
         <p>Drop files</p>
         <span className="library__sub">raw CSV · video · audio</span>
       </div>
+      <button
+        className="library__carrier"
+        title="Add a neutral all-ones data source (16ch) — draw an envelope over it to author the servo signal"
+        onClick={(e) => {
+          e.stopPropagation()
+          onNewCarrier()
+        }}
+      >
+        ＋ New carrier (all 1s)
+      </button>
 
       {/* ② Process */}
       <div className="stage__header">
@@ -111,6 +126,15 @@ export default function LibraryPanel({
       {/* ③ Ready → timeline */}
       <div className="stage__header">
         <span className="stage__num">3</span> Ready → timeline
+        {relinkCount > 0 && (
+          <button
+            className="stage__action"
+            onClick={onRelinkAll}
+            title="Pick all the original media files at once — they auto-match by filename"
+          >
+            ⚠ Re-link all ({relinkCount})
+          </button>
+        )}
       </div>
       <div className="library__filters">
         {FILTERS.map(([key, label]) => (
@@ -147,7 +171,9 @@ export default function LibraryPanel({
               onDragEnd={onDragSourceEnd}
             >
               <span className="mediabin__icon">{KIND_ICON[s.kind]}</span>
-              <span className="library__name">{middleEllipsis(s.name, 16)}</span>
+              <span className="library__name library__name--full" title={s.name}>
+                {s.name}
+              </span>
               {s.needsRelink ? (
                 <button
                   className="library__relink"
