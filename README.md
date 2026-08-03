@@ -2,7 +2,7 @@
 
 A pure front-end, browser-based non-linear editor for **video**, **multi-track audio**, and **16-channel time-series CSV** on one shared timeline.
 
-FuseEditor exists to author **servo-drive signals for haptic robotic hands**: import recorded FMG (muscle-activity) data next to the reference video, normalize it, shape it by drawing intensity envelopes over the data, then **export a gap-free CSV** or **stream live to TouchDesigner** to drive the servo motors — all aligned frame-accurately to the video.
+FuseEditor exists to author **servo-drive signals for haptic device FeelFuse**: import recorded FMG (muscle-activity) data next to the reference video, normalize it, shape it by drawing intensity envelopes over the data, then **export a gap-free CSV** or **stream live to TouchDesigner** to drive the servo motors — all aligned frame-accurately to the video.
 
 ## Status
 🟢 **Working.** Video/audio/CSV editing, the FMG processing pipeline, envelope authoring, CSV/WAV export, and live TouchDesigner streaming are all functional. Everything runs in the browser — no backend.
