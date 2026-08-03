@@ -1,4 +1,4 @@
-# Experium Editor
+# FuseEditor
 
 A browser-based editor for **video**, **audio**, and **time-series CSV** on a shared timeline.
 

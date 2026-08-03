@@ -1,9 +1,9 @@
 {
-  "name": "experium-editor",
+  "name": "fuse-editor",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Experium Editor — edit video, audio, and time-series CSV on a shared timeline",
+  "description": "FuseEditor — edit video, audio, and time-series CSV on a shared timeline",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

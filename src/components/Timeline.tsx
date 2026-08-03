@@ -4,6 +4,7 @@ import type { Tool } from './Clip'
 import Clip from './Clip'
 import IntensityLane from './IntensityLane'
 import type { LaneMode } from './IntensityLane'
+import EnvelopeFocus from './EnvelopeFocus'
 import type { Keyframe, Interp } from '../types'
 import { PRESETS, type PresetId } from '../lib/envelope'
 import { middleEllipsis, fmtTime } from '../lib/format'
@@ -26,12 +27,13 @@ interface Props {
   tool: Tool
   snapEnabled: boolean
   selectedClipId: string | null
+  selectedIds: string[]
   setPixelsPerSecond: (v: number) => void
   setTrackHeight: (v: number) => void
   setAmpScale: (v: number) => void
   setTool: (t: Tool) => void
   setSnap: (v: boolean) => void
-  onSelectClip: (id: string | null) => void
+  onSelectClip: (id: string | null, additive?: boolean) => void
   onScrub: (t: number) => void
   onSeek: (t: number) => void
   onSetTrackMix: (trackId: string, patch: Partial<TrackMix>) => void
@@ -88,6 +90,7 @@ export default function Timeline(props: Props) {
   const [envInterp, setEnvInterp] = useState<Interp>('linear')
   const [envSnap, setEnvSnap] = useState(false)
   const [armedPreset, setArmedPreset] = useState<PresetId | null>(null)
+  const [focusTrack, setFocusTrack] = useState<string | null>(null) // big dedicated envelope editor
   // Horizontal scroll offset + visible width — the intensity lanes render ONLY this slice,
   // so their SVG is always ~one screen wide (never the whole timeline). That keeps envelope
   // dragging cheap and avoids the huge-layer render stall (black screen) at high zoom.
@@ -107,10 +110,11 @@ export default function Timeline(props: Props) {
   }
   const gesture = useRef<null | {
     kind: 'move' | 'trim-l' | 'trim-r' | 'fade-l' | 'fade-r'
-    base: ClipT
+    base: ClipT // the clip actually grabbed (primary — trim/fade/cross-track use this)
+    bases: ClipT[] // every clip that moves this gesture (>1 = group move); [base] otherwise
     startX: number
     snaps: number[]
-    last?: { start: number; trackId: string }
+    last?: { start: number; trackId: string; d?: number }
   }>(null)
   const scrub = useRef<null | { rectLeft: number }>(null)
 
@@ -186,6 +190,61 @@ export default function Timeline(props: Props) {
     }
     return out
   }
+  function snapTimesExcluding(ids: string[]): number[] {
+    const set = new Set(ids)
+    const out: number[] = [0, playhead]
+    for (const c of project.clips) {
+      if (set.has(c.id)) continue
+      out.push(c.start, c.start + c.duration)
+    }
+    return out
+  }
+  // Clamp a rigid group's shift so no clip lands before 0 or overlaps a non-group neighbour on its
+  // track — the tightest limit across the whole group wins (relative offsets stay locked: option A).
+  function clampGroupDelta(bases: ClipT[], d: number): number {
+    const ids = new Set(bases.map((b) => b.id))
+    let dMin = -Math.min(...bases.map((b) => b.start)) // earliest clip can't cross 0
+    let dMax = Infinity
+    for (const b of bases) {
+      const bEnd = b.start + b.duration
+      for (const n of project.clips) {
+        if (n.trackId !== b.trackId || ids.has(n.id)) continue
+        const nEnd = n.start + n.duration
+        if (n.start >= bEnd - 1e-6) dMax = Math.min(dMax, n.start - bEnd)
+        else if (nEnd <= b.start + 1e-6) dMin = Math.max(dMin, nEnd - b.start)
+      }
+    }
+    if (dMin > dMax) return 0 // boxed in on both sides — don't move
+    return Math.max(dMin, Math.min(dMax, d))
+  }
+  function moveGroupClips(bases: ClipT[], d: number): Project {
+    const byId = new Map(bases.map((b) => [b.id, b]))
+    return { ...project, clips: project.clips.map((c) => (byId.has(c.id) ? { ...c, start: byId.get(c.id)!.start + d } : c)) }
+  }
+  // Commit a group move: shift every clip, and carry each clip's envelope (the keyframes that sat
+  // over it) by the same delta so drawn envelopes stay aligned to their data.
+  function commitGroupMove(bases: ClipT[], d: number): Project {
+    const byId = new Map(bases.map((b) => [b.id, b]))
+    const clips = project.clips.map((c) => (byId.has(c.id) ? { ...c, start: byId.get(c.id)!.start + d } : c))
+    if (Math.abs(d) < 1e-6) return { ...project, clips }
+    const spans = new Map<string, { lo: number; hi: number }[]>()
+    for (const b of bases) {
+      const arr = spans.get(b.trackId) ?? []
+      arr.push({ lo: b.start - 1e-6, hi: b.start + b.duration + 1e-6 })
+      spans.set(b.trackId, arr)
+    }
+    const tracks = project.tracks.map((t) => {
+      const s = spans.get(t.id)
+      if (!s || !t.intensity?.length) return t
+      return {
+        ...t,
+        intensity: t.intensity
+          .map((k) => (s.some((sp) => k.t >= sp.lo && k.t <= sp.hi) ? { ...k, t: Math.max(0, k.t + d) } : k))
+          .sort((a, b) => a.t - b.t),
+      }
+    })
+    return { ...project, clips, tracks }
+  }
   function snap(t: number, snaps: number[]): number {
     if (!snapEnabled) return t
     const thr = SNAP_PX / pps
@@ -209,9 +268,14 @@ export default function Timeline(props: Props) {
   function onBodyDown(id: string, e: React.PointerEvent) {
     const clip = project.clips.find((c) => c.id === id)
     if (!clip) return
-    props.onSelectClip(id)
+    const additive = e.metaKey || e.shiftKey || e.ctrlKey
+    props.onSelectClip(id, additive)
+    if (additive) return // ⌘/⇧-click only adjusts the selection — no drag
     props.beginGesture()
-    gesture.current = { kind: 'move', base: clip, startX: e.clientX, snaps: snapTimes(id) }
+    // Group = the current selection if this clip is part of it, else just this clip.
+    const group = props.selectedIds.includes(id) ? props.selectedIds : [id]
+    const bases = project.clips.filter((c) => group.includes(c.id))
+    gesture.current = { kind: 'move', base: clip, bases, startX: e.clientX, snaps: snapTimesExcluding(group) }
     addWindowListeners()
   }
   function onTrimDown(id: string, edge: 'l' | 'r', e: React.PointerEvent) {
@@ -219,7 +283,7 @@ export default function Timeline(props: Props) {
     if (!clip) return
     props.onSelectClip(id)
     props.beginGesture()
-    gesture.current = { kind: edge === 'l' ? 'trim-l' : 'trim-r', base: clip, startX: e.clientX, snaps: snapTimes(id) }
+    gesture.current = { kind: edge === 'l' ? 'trim-l' : 'trim-r', base: clip, bases: [clip], startX: e.clientX, snaps: snapTimes(id) }
     addWindowListeners()
   }
   function onFadeDown(id: string, edge: 'l' | 'r', e: React.PointerEvent) {
@@ -227,7 +291,7 @@ export default function Timeline(props: Props) {
     if (!clip) return
     props.onSelectClip(id)
     props.beginGesture()
-    gesture.current = { kind: edge === 'l' ? 'fade-l' : 'fade-r', base: clip, startX: e.clientX, snaps: [] }
+    gesture.current = { kind: edge === 'l' ? 'fade-l' : 'fade-r', base: clip, bases: [clip], startX: e.clientX, snaps: [] }
     addWindowListeners()
   }
   function addWindowListeners() {
@@ -240,7 +304,17 @@ export default function Timeline(props: Props) {
     const dx = (e.clientX - g.startX) / pps
     const srcDur = sourcesById[g.base.sourceId]?.fullDuration ?? g.base.inPoint + g.base.duration
 
-    if (g.kind === 'move') {
+    if (g.kind === 'move' && g.bases.length > 1) {
+      // Rigid group move: horizontal only, no track change. Snap by the grabbed clip's nearer
+      // edge, then clamp so the whole group stops the moment any member would overlap (option A).
+      const raw = g.base.start + dx
+      const sl = snap(raw, g.snaps)
+      const sr = snap(raw + g.base.duration, g.snaps) - g.base.duration
+      const ns = Math.abs(sl - raw) <= Math.abs(sr - raw) ? sl : sr
+      const d = clampGroupDelta(g.bases, ns - g.base.start)
+      g.last = { start: g.base.start + d, trackId: g.base.trackId, d }
+      props.liveProject(moveGroupClips(g.bases, d))
+    } else if (g.kind === 'move') {
       let ns = Math.max(0, g.base.start + dx)
       const sl = snap(ns, g.snaps)
       const sr = snap(ns + g.base.duration, g.snaps) - g.base.duration
@@ -295,17 +369,38 @@ export default function Timeline(props: Props) {
     const g = gesture.current
     gesture.current = null
     window.removeEventListener('pointermove', onPointerMove)
-    // On release, snap a moved clip to a free slot so it never overlaps a neighbour.
-    if (g && g.kind === 'move' && g.last) {
+    // On release, snap a moved clip to a free slot so it never overlaps a neighbour, and carry
+    // this clip's envelope with it (shift the keyframes that sat over the clip by the same delta,
+    // same track only) so a drawn envelope stays aligned to the data after a nudge.
+    if (g && g.kind === 'move' && g.bases.length > 1 && g.last) {
+      // Group move already stayed overlap-free while dragging; just commit at the final delta
+      // (carrying each clip's envelope along) — no per-clip re-snap that could break the offsets.
+      props.liveProject(commitGroupMove(g.bases, g.last.d ?? 0))
+    } else if (g && g.kind === 'move' && g.last) {
       const { start, trackId } = g.last
       const others = project.clips.filter((c) => c.trackId === trackId && c.id !== g.base.id)
-      const resolved = resolveStart(others, start, g.base.duration)
-      if (Math.abs(resolved - start) > 1e-6) {
-        props.liveProject({
-          ...project,
-          clips: project.clips.map((c) => (c.id === g.base.id ? { ...c, start: resolved, trackId } : c)),
-        })
-      }
+      const finalStart = resolveStart(others, start, g.base.duration)
+      const delta = finalStart - g.base.start
+      const sameTrack = trackId === g.base.trackId
+      const lo = g.base.start - 1e-6
+      const hi = g.base.start + g.base.duration + 1e-6
+      props.liveProject({
+        ...project,
+        tracks:
+          sameTrack && Math.abs(delta) > 1e-6
+            ? project.tracks.map((t) =>
+                t.id === trackId && t.intensity?.length
+                  ? {
+                      ...t,
+                      intensity: t.intensity
+                        .map((k) => (k.t >= lo && k.t <= hi ? { ...k, t: Math.max(0, k.t + delta) } : k))
+                        .sort((a, b) => a.t - b.t),
+                    }
+                  : t,
+              )
+            : project.tracks,
+        clips: project.clips.map((c) => (c.id === g.base.id ? { ...c, start: finalStart, trackId } : c)),
+      })
     }
     props.endGesture()
   }
@@ -554,6 +649,11 @@ export default function Timeline(props: Props) {
                         ◆
                       </button>
                     )}
+                    {track.kind === 'csv' && (
+                      <button className="tbtn" title="Edit envelope in a big dedicated canvas" onClick={() => setFocusTrack(track.id)}>
+                        ⛶
+                      </button>
+                    )}
                     <button className={'tbtn' + (mix.locked ? ' tbtn--on' : '')} title="Lock" onClick={() => props.onSetTrackMix(track.id, { locked: !mix.locked })}>
                       {mix.locked ? '🔒' : '🔓'}
                     </button>
@@ -596,7 +696,7 @@ export default function Timeline(props: Props) {
                         ampScale={ampScale}
                         automation={track.intensity}
                         tool={tool}
-                        selected={selectedClipId === clip.id}
+                        selected={props.selectedIds.includes(clip.id)}
                         locked={mix.locked}
                         onSelect={props.onSelectClip}
                         onBladeSplit={props.onSplitAt}
@@ -635,6 +735,43 @@ export default function Timeline(props: Props) {
           <div ref={playheadRef} className="timeline__playhead" style={{ left: HEAD_WIDTH + playhead * pps }} />
         </div>
       </div>
+
+      {focusTrack &&
+        (() => {
+          const track = project.tracks.find((t) => t.id === focusTrack)
+          if (!track) return null
+          return (
+            <EnvelopeFocus
+              track={track}
+              clips={project.clips.filter((c) => c.trackId === track.id)}
+              sourcesById={sourcesById}
+              totalDuration={totalDuration}
+              maxValue={track.kind === 'audio' ? 3 : 1}
+              neutral={track.kind === 'audio' ? 1 : 0.5}
+              unitLabel={track.kind === 'audio' ? 'volume (up to 3×)' : 'intensity'}
+              mode={envMode}
+              setMode={setEnvMode}
+              interp={envInterp}
+              setInterp={setEnvInterp}
+              snap={envSnap}
+              setSnap={setEnvSnap}
+              armedPreset={armedPreset}
+              setArmedPreset={setArmedPreset}
+              onSetIntensity={(kf) => setIntensity(track.id, kf)}
+              beginGesture={props.beginGesture}
+              endGesture={props.endGesture}
+              onClear={() => {
+                props.beginGesture()
+                props.liveProject({
+                  ...project,
+                  tracks: project.tracks.map((t) => (t.id === track.id ? { ...t, intensity: [] } : t)),
+                })
+                props.endGesture()
+              }}
+              onClose={() => setFocusTrack(null)}
+            />
+          )
+        })()}
     </section>
   )
 }

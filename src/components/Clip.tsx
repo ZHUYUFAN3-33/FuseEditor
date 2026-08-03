@@ -16,7 +16,7 @@ interface Props {
   tool: Tool
   selected: boolean
   locked: boolean
-  onSelect: (id: string) => void
+  onSelect: (id: string, additive: boolean) => void
   onBladeSplit: (id: string, offsetSec: number) => void
   onBodyDown: (id: string, e: React.PointerEvent) => void
   onTrimDown: (id: string, edge: 'l' | 'r', e: React.PointerEvent) => void
@@ -53,11 +53,13 @@ export default function Clip({
   }
 
   function handleClick(e: React.MouseEvent) {
-    if (!locked && tool === 'blade') {
-      onBladeSplit(clip.id, e.nativeEvent.offsetX / pixelsPerSecond)
+    if (tool === 'blade') {
+      if (!locked) onBladeSplit(clip.id, e.nativeEvent.offsetX / pixelsPerSecond)
       return
     }
-    onSelect(clip.id)
+    // Unlocked clips are selected on pointer-down (so a drag can carry the whole group); only
+    // locked clips — which never start a drag — still need selecting on click, for the Inspector.
+    if (locked) onSelect(clip.id, e.shiftKey || e.metaKey || e.ctrlKey)
   }
 
   return (

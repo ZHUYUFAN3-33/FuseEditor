@@ -65,8 +65,10 @@ export function parseProjectFile(text: string): ProjectSnapshot {
     throw new Error('檔案不是有效的 JSON')
   }
   const d = data as Partial<ProjectSnapshot>
-  if (d?.app !== 'experium-editor' || !d.project || !Array.isArray(d.sources)) {
-    throw new Error('不是有效的 Experium 專案檔（.experium）')
+  // 'experium-editor' is the original on-disk format tag; kept for backward-compat so existing
+  // .experium files still load after the app was renamed to FuseEditor.
+  if ((d?.app !== 'experium-editor' && d?.app !== 'fuse-editor') || !d.project || !Array.isArray(d.sources)) {
+    throw new Error('不是有效的 FuseEditor 專案檔（.experium）')
   }
   return d as ProjectSnapshot
 }

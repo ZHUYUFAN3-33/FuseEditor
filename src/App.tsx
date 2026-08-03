@@ -104,8 +104,30 @@ export default function App() {
   const [ampScale, setAmpScale] = useState(1)
   const [tool, setTool] = useState<Tool>('select')
   const [snap, setSnap] = useState(true)
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
+  // Multi-selection: an ordered list of clip ids. The last one is the "primary" (drives the
+  // Inspector and the single-clip ops); the whole set moves together when you drag any member.
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const selectedClipId = selectedIds[selectedIds.length - 1] ?? null
+  const selectClip = useCallback((cid: string | null, additive?: boolean) => {
+    if (cid === null) return setSelectedIds([])
+    setSelectedIds((prev) =>
+      additive
+        ? prev.includes(cid)
+          ? prev.filter((x) => x !== cid) // ⌘/⇧-click a selected clip → remove it
+          : [...prev, cid] // ⌘/⇧-click → add to the selection
+        : prev.includes(cid)
+          ? prev // plain click on a group member → keep the group (so you can drag it)
+          : [cid], // plain click elsewhere → select just this one
+    )
+  }, [])
   const [playhead, setPlayhead] = useState(0)
+  // ---- live streaming to TouchDesigner over WebSocket ----
+  const [liveTd, setLiveTd] = useState(false)
+  const [tdUrl, setTdUrl] = useState('ws://localhost:9980')
+  const [tdStatus, setTdStatus] = useState<'off' | 'connecting' | 'open' | 'error'>('off')
+  const tdWs = useRef<WebSocket | null>(null)
+  const liveTdRef = useRef(false)
+  liveTdRef.current = liveTd
   const [frameRate, setFrameRate] = useState(60) // fps for the ◁ ▷ frame-step buttons
   const [isPlaying, setIsPlaying] = useState(false)
   const [loop, setLoop] = useState(false)
@@ -324,7 +346,7 @@ export default function App() {
         return n
       })
       if (usedClips.length) {
-        if (selectedClipId && usedClips.some((c) => c.id === selectedClipId)) setSelectedClipId(null)
+        if (selectedClipId && usedClips.some((c) => c.id === selectedClipId)) setSelectedIds([])
         history.commit({ ...project, clips: project.clips.filter((c) => !ids.has(c.sourceId)) })
       }
     },
@@ -487,7 +509,7 @@ export default function App() {
     (trackId: string) => {
       if (project.tracks.length <= 1) return // keep at least one track
       const removed = new Set(project.clips.filter((c) => c.trackId === trackId).map((c) => c.id))
-      if (selectedClipId && removed.has(selectedClipId)) setSelectedClipId(null)
+      if (selectedClipId && removed.has(selectedClipId)) setSelectedIds([])
       history.commit({ tracks: project.tracks.filter((t) => t.id !== trackId), clips: project.clips.filter((c) => c.trackId !== trackId) })
     },
     [history, project, selectedClipId],
@@ -549,7 +571,7 @@ export default function App() {
         )
       }
       history.commit({ ...project, clips })
-      setSelectedClipId(null)
+      setSelectedIds([])
     },
     [history, project, selectedClipId],
   )
@@ -560,7 +582,7 @@ export default function App() {
     if (!sel) return
     const copy: Clip = { ...sel, id: id('clp'), start: sel.start + sel.duration }
     history.commit({ ...project, clips: [...project.clips, copy] })
-    setSelectedClipId(copy.id)
+    setSelectedIds([copy.id])
   }, [history, project, selectedClipId])
 
   const nudgeSelected = useCallback(
@@ -581,18 +603,17 @@ export default function App() {
   // ---------- export ----------
   // Export length = video duration; fall back to the longest clip if there's no video.
   const exportLength = useMemo(() => {
-    // Match the LONGEST media so the servo data spans the whole timeline, padding
-    // gaps (no clip) with 0. Counts both what's placed on the timeline (clip ends)
-    // AND every imported source's full length — a video/audio only previewed (never
-    // dragged onto a track) still defines the master length the export must reach.
-    let len = 0
+    // Length of the VIDEO placed on the timeline — servo data spans exactly that, padding any gap
+    // (no clip) with 0. Only PLACED clips count: an imported-but-unused source (an older take still
+    // sitting in the library) must never stretch the export. Fall back to the longest placed clip
+    // if the project has no video at all.
+    let videoLen = 0
     for (const c of project.clips) {
-      const end = c.start + c.duration
-      if (Number.isFinite(end) && end > len) len = end
+      if (sources[c.sourceId]?.kind === 'video') videoLen = Math.max(videoLen, c.start + c.duration)
     }
-    for (const s of Object.values(sources)) {
-      if (Number.isFinite(s.fullDuration) && s.fullDuration > len) len = s.fullDuration
-    }
+    if (videoLen > 0) return videoLen
+    let len = 0
+    for (const c of project.clips) len = Math.max(len, c.start + c.duration)
     return len
   }, [project.clips, sources])
 
@@ -710,7 +731,7 @@ export default function App() {
         if (e.data.size) chunks.push(e.data)
       }
 
-      setSelectedClipId(null)
+      setSelectedIds([])
       setIsPlaying(false)
       await engine.play(0, project, sources, gains, masterVolume)
       rec.start(100)
@@ -809,7 +830,7 @@ export default function App() {
         setAmpScale(snap.view.ampScale)
         setMasterVolume(snap.view.masterVolume)
       }
-      setSelectedClipId(null)
+      setSelectedIds([])
       setPlayhead(0)
       setRawData([])
       history.reset(snap.project)
@@ -927,6 +948,9 @@ export default function App() {
           return
         }
       } else setPlayhead(Math.min(t, ref.total.current))
+      if (liveTdRef.current && tdWs.current?.readyState === WebSocket.OPEN) {
+        tdWs.current.send(JSON.stringify(buildLiveFrame(Math.min(t, ref.total.current))))
+      }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
@@ -941,6 +965,87 @@ export default function App() {
   useEffect(() => {
     setPlayhead((p) => (p > totalDuration ? totalDuration : p))
   }, [totalDuration])
+
+  // Build one live frame: per CSV track, the output = data × envelope × fade at time t (the same
+  // value the CSV export writes). Sent as JSON to TouchDesigner's WebSocket DAT.
+  const buildLiveFrame = (t: number) => {
+    const proj = ref.project.current
+    const srcs = ref.sources.current
+    const tracks: Record<string, number[]> = {}
+    for (const track of proj.tracks) {
+      if (track.kind !== 'csv') continue
+      const anyClip = proj.clips.find((c) => c.trackId === track.id && srcs[c.sourceId]?.csv)
+      const chan = anyClip ? srcs[anyClip.sourceId]!.csv!.series.length : 0
+      const clip = proj.clips.find(
+        (c) => c.trackId === track.id && srcs[c.sourceId]?.csv && t >= c.start - 1e-9 && t <= c.start + c.duration + 1e-9,
+      )
+      const csv = clip ? srcs[clip.sourceId]?.csv : null
+      if (!clip || !csv) {
+        tracks[track.name] = new Array(chan).fill(0) // gap / no clip → 0 (servo neutral)
+        continue
+      }
+      const srcT = t - clip.start + clip.inPoint
+      const local = t - clip.start
+      let fade = 1
+      if (clip.fadeIn && clip.fadeIn > 0 && local < clip.fadeIn) fade = Math.min(fade, local / clip.fadeIn)
+      if (clip.fadeOut && clip.fadeOut > 0 && local > clip.duration - clip.fadeOut)
+        fade = Math.min(fade, (clip.duration - local) / clip.fadeOut)
+      const g = intensityAt(track.intensity, t) * Math.max(0, Math.min(1, fade))
+      tracks[track.name] = csv.series.map((s) => Number((((sampleSeries(s, srcT) ?? 0) * g)).toFixed(4)))
+    }
+    return { t: Number(t.toFixed(4)), tracks }
+  }
+
+  // Open the WebSocket to TouchDesigner while the live toggle is on, auto-reconnecting on drop.
+  // (StrictMode-safe: each effect run owns its own `closed` flag, so the dev double-mount can't
+  // leave a stale socket wedged in an error state.)
+  useEffect(() => {
+    if (!liveTd) {
+      setTdStatus('off')
+      return
+    }
+    let closed = false
+    let retry = 0
+    const connect = () => {
+      if (closed) return
+      setTdStatus('connecting')
+      let ws: WebSocket
+      try {
+        ws = new WebSocket(tdUrl)
+      } catch {
+        retry = window.setTimeout(connect, 1200)
+        return
+      }
+      tdWs.current = ws
+      ws.onopen = () => !closed && setTdStatus('open')
+      ws.onerror = () => {} // let onclose drive the retry so we never get stuck on 'error'
+      ws.onclose = () => {
+        if (tdWs.current === ws) tdWs.current = null
+        if (!closed) {
+          setTdStatus('connecting')
+          retry = window.setTimeout(connect, 1200)
+        }
+      }
+    }
+    connect()
+    return () => {
+      closed = true
+      clearTimeout(retry)
+      if (tdWs.current) {
+        tdWs.current.onopen = tdWs.current.onerror = tdWs.current.onclose = null
+        tdWs.current.close()
+        tdWs.current = null
+      }
+    }
+  }, [liveTd, tdUrl])
+
+  // While paused, scrubbing the playhead still pushes the current pose to TD.
+  useEffect(() => {
+    if (liveTd && !isPlaying && tdWs.current?.readyState === WebSocket.OPEN) {
+      tdWs.current.send(JSON.stringify(buildLiveFrame(playhead)))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playhead, liveTd, isPlaying])
 
   // Live mixer / master / volume-automation changes while playing.
   useEffect(() => {
@@ -1024,22 +1129,21 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [history, splitAtPlayhead, mergeSelected, deleteSelected, duplicateSelected, nudgeSelected, seek, selectedClipId, totalDuration])
 
-  // ---------- derived: video frame + csv readout ----------
-  const videoClip = project.clips.find((c) => {
-    const src = sources[c.sourceId]
-    return src?.kind === 'video' && playhead >= c.start && playhead <= c.start + c.duration
-  })
-  const videoCovered = !!videoClip
-  let videoUrl: string | undefined
-  let videoTime: number | null = null
-  if (videoClip) {
-    videoUrl = sources[videoClip.sourceId]?.mediaUrl
-    videoTime = videoClip.inPoint + (playhead - videoClip.start)
-  } else {
-    // Keep an element mounted (avoids reload flicker) but the preview shows black —
-    // there is no video at this playhead position.
-    videoUrl = Object.values(sources).find((s) => s.kind === 'video' && s.mediaUrl)?.mediaUrl
-  }
+  // ---------- derived: video frames + csv readout ----------
+  // Every video clip covering the playhead — shown side-by-side so you can time-align two takes.
+  const videoLayers = project.clips
+    .filter((c) => {
+      const s = sources[c.sourceId]
+      return s?.kind === 'video' && s.mediaUrl && playhead >= c.start && playhead <= c.start + c.duration
+    })
+    .map((c) => ({
+      id: c.id,
+      url: sources[c.sourceId]!.mediaUrl!,
+      time: c.inPoint + (playhead - c.start),
+      name: sources[c.sourceId]!.name,
+      ord: project.tracks.findIndex((t) => t.id === c.trackId),
+    }))
+    .sort((a, b) => a.ord - b.ord)
 
   const onTimelineSourceIds = new Set(project.clips.map((c) => c.sourceId))
 
@@ -1148,20 +1252,23 @@ export default function App() {
         <ResizeHandle axis="x" onDelta={(d) => setMediaWidth((w) => clamp(w + d, 180, 480))} />
         <main className="app__center">
           <Preview
-            videoUrl={videoUrl}
-            videoCovered={videoCovered}
-            videoTime={videoTime}
+            videoLayers={videoLayers}
             isPlaying={isPlaying}
             loop={loop}
             masterVolume={masterVolume}
             playhead={playhead}
             totalDuration={totalDuration}
             frameRate={frameRate}
+            liveTd={liveTd}
+            tdUrl={tdUrl}
+            tdStatus={tdStatus}
             onTogglePlay={() => setIsPlaying((p) => !p)}
             onSeek={seek}
             onToggleLoop={() => setLoop((v) => !v)}
             onMasterVolume={setMasterVolume}
             onFrameRate={setFrameRate}
+            onToggleLiveTd={() => setLiveTd((v) => !v)}
+            onTdUrl={setTdUrl}
           />
           <ResizeHandle axis="y" onDelta={(d) => setTimelineHeight((h) => clamp(h - d, 160, 600))} />
           <div className="timeline-wrap" style={{ height: timelineHeight }}>
@@ -1178,12 +1285,13 @@ export default function App() {
               tool={tool}
               snapEnabled={snap}
               selectedClipId={selectedClipId}
+              selectedIds={selectedIds}
               setPixelsPerSecond={setPixelsPerSecond}
               setTrackHeight={setTrackHeight}
               setAmpScale={setAmpScale}
               setTool={setTool}
               setSnap={setSnap}
-              onSelectClip={setSelectedClipId}
+              onSelectClip={selectClip}
               onScrub={(t) => setPlayhead(Math.max(0, Math.min(t, totalDuration)))}
               onSeek={seek}
               onSetTrackMix={setTrackMix}

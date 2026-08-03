@@ -27,7 +27,7 @@ export default function TopBar({
     <header className="topbar">
       <div className="topbar__brand">
         <span className="topbar__logo">◐</span>
-        <span className="topbar__title">Experium Editor</span>
+        <span className="topbar__title">FuseEditor</span>
       </div>
       <nav className="topbar__menu">
         <button className="topbar__btn" onClick={onOpenProject}>
