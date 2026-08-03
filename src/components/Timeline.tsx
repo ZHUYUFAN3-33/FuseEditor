@@ -1,4 +1,31 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  Activity,
+  Contrast,
+  Copy,
+  Diamond,
+  Eraser,
+  Film,
+  Link2,
+  Lock,
+  Magnet,
+  Maximize,
+  Maximize2,
+  Minus,
+  MousePointer2,
+  MoveVertical,
+  Music,
+  Pencil,
+  Plus,
+  Scissors,
+  SplitSquareVertical,
+  Trash2,
+  Unlock,
+  Volume2,
+  VolumeX,
+  Waves,
+  X,
+} from 'lucide-react'
 import type { Clip as ClipT, MediaSource, Project, TrackKind, TrackMix } from '../types'
 import type { Tool } from './Clip'
 import Clip from './Clip'
@@ -437,24 +464,24 @@ export default function Timeline(props: Props) {
       <div className="timeline__toolbar">
         <div className="toolgroup">
           <button className={'tool' + (tool === 'select' ? ' tool--on' : '')} title="Select / move / trim (V)" onClick={() => props.setTool('select')}>
-            ↖
+            <MousePointer2 size={15} />
           </button>
           <button className={'tool' + (tool === 'blade' ? ' tool--on' : '')} title="Blade — click a clip to split (B)" onClick={() => props.setTool('blade')}>
-            ✂
+            <Scissors size={15} />
           </button>
         </div>
         <div className="toolgroup">
           <button className="tool" title="Split at playhead (S)" onClick={props.onSplitAtPlayhead}>
-            ⎶
+            <SplitSquareVertical size={15} />
           </button>
           <button className="tool" title="Merge with next clip (M)" disabled={!selectedClipId} onClick={props.onMergeSelected}>
-            🔗
+            <Link2 size={15} />
           </button>
           <button className="tool" title="Duplicate (⌘D)" disabled={!selectedClipId} onClick={props.onDuplicate}>
-            ⎘
+            <Copy size={15} />
           </button>
           <button className="tool" title="Delete (⌫ · ⇧⌫ ripple)" disabled={!selectedClipId} onClick={props.onDeleteSelected}>
-            🗑
+            <Trash2 size={15} />
           </button>
         </div>
         <div className="toolgroup" title="Add track">
@@ -466,35 +493,36 @@ export default function Timeline(props: Props) {
               disabled={project.tracks.filter((t) => t.kind === k).length >= props.maxPerKind}
               onClick={() => props.onAddTrack(k)}
             >
-              ＋{k === 'video' ? '🎬' : k === 'audio' ? '🎵' : '📈'}
+              <Plus size={13} />
+              {k === 'video' ? <Film size={14} /> : k === 'audio' ? <Music size={14} /> : <Activity size={14} />}
             </button>
           ))}
         </div>
         <button className={'tool' + (snapEnabled ? ' tool--on' : '')} title="Snapping" onClick={() => props.setSnap(!snapEnabled)}>
-          🧲
+          <Magnet size={15} />
         </button>
         <button className="tool" title="Zoom to fit" onClick={() => props.onFit((scrollRef.current?.clientWidth ?? 800) - HEAD_WIDTH)}>
-          ⤢
+          <Maximize size={15} />
         </button>
 
         <div className="timeline__spacer" />
 
         <div className="zoom" title="Horizontal zoom (time scale)">
           <button className="tool" title="Zoom out (–)" onClick={() => applyZoom(pps / 1.4)}>
-            －
+            <Minus size={14} />
           </button>
           <input type="range" min={6} max={maxPps} value={pps} onChange={(e) => applyZoom(Number(e.target.value))} />
           <button className="tool" title="Zoom in (+)" onClick={() => applyZoom(pps * 1.4)}>
-            ＋
+            <Plus size={14} />
           </button>
           <span className="zoom__val">{Math.round(pps)}px/s</span>
         </div>
-        <label className="zoom">
-          ↕
+        <label className="zoom" title="Track height">
+          <MoveVertical size={14} />
           <input type="range" min={44} max={220} value={trackHeight} onChange={(e) => props.setTrackHeight(Number(e.target.value))} />
         </label>
-        <label className="zoom">
-          ◎
+        <label className="zoom" title="Visualization amplitude">
+          <Contrast size={14} />
           <input type="range" min={0.2} max={4} step={0.1} value={ampScale} onChange={(e) => props.setAmpScale(Number(e.target.value))} />
           <span className="zoom__val">{ampScale.toFixed(1)}×</span>
         </label>
@@ -502,13 +530,13 @@ export default function Timeline(props: Props) {
 
       {intensityTracks.size > 0 && (
         <div className="envbar">
-          <span className="envbar__label">◆ Envelope</span>
+          <span className="envbar__label"><Diamond size={12} fill="currentColor" style={{ verticalAlign: '-1px' }} /> Envelope</span>
           <div className="toolgroup">
             {([
-              ['point', '✎ Point', 'Point — click to add, drag to move, double-click a point to delete'],
-              ['pencil', '〜 Draw', 'Draw — freehand-sketch the curve; it simplifies to points'],
-              ['erase', '⌫ Erase', 'Erase — click or drag over points to delete them'],
-            ] as [LaneMode, string, string][]).map(([m, label, tip]) => (
+              ['point', <><Pencil size={13} /> Point</>, 'Point — click to add, drag to move, double-click a point to delete'],
+              ['pencil', <><Waves size={13} /> Draw</>, 'Draw — freehand-sketch the curve; it simplifies to points'],
+              ['erase', <><Eraser size={13} /> Erase</>, 'Erase — click or drag over points to delete them'],
+            ] as [LaneMode, ReactNode, string][]).map(([m, label, tip]) => (
               <button key={m} className={'tool' + (envMode === m ? ' tool--on' : '')} title={tip} onClick={() => setEnvMode(m)}>
                 {label}
               </button>
@@ -526,10 +554,10 @@ export default function Timeline(props: Props) {
             ))}
           </div>
           <button className={'tool' + (envSnap ? ' tool--on' : '')} title="Snap keyframes to a grid" onClick={() => setEnvSnap(!envSnap)}>
-            🧲 Snap
+            <Magnet size={13} /> Snap
           </button>
           <button className="tool" title="Clear the whole envelope on the open lane(s)" onClick={() => editOpenLanes(() => [])}>
-            🗑 Clear
+            <Trash2 size={13} /> Clear
           </button>
           <div className="envbar__spacer" />
           <span className="envbar__label">Stamp:</span>
@@ -589,7 +617,9 @@ export default function Timeline(props: Props) {
               <div className="track" key={track.id} style={{ height: trackHeight }}>
                 <div className="track__head" style={{ width: HEAD_WIDTH }}>
                   <div className="track__headtop">
-                    <span className="track__icon">{track.kind === 'video' ? '🎬' : track.kind === 'audio' ? '🎵' : '📈'}</span>
+                    <span className="track__icon">
+                      {track.kind === 'video' ? <Film size={14} /> : track.kind === 'audio' ? <Music size={14} /> : <Activity size={14} />}
+                    </span>
                     {editingTrack === track.id ? (
                       <input
                         className="track__rename"
@@ -616,14 +646,14 @@ export default function Timeline(props: Props) {
                       disabled={project.tracks.length <= 1}
                       onClick={() => props.onRemoveTrack(track.id)}
                     >
-                      ✕
+                      <X size={12} />
                     </button>
                   </div>
                   <div className="track__ctrls">
                     {hasAudio && (
                       <>
                         <button className={'tbtn' + (mix.muted ? ' tbtn--on' : '')} title="Mute" onClick={() => props.onSetTrackMix(track.id, { muted: !mix.muted })}>
-                          {mix.muted ? '🔇' : '🔈'}
+                          {mix.muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
                         </button>
                         <button className={'tbtn' + (mix.solo ? ' tbtn--solo' : '')} title="Solo" onClick={() => props.onSetTrackMix(track.id, { solo: !mix.solo })}>
                           S
@@ -646,16 +676,16 @@ export default function Timeline(props: Props) {
                         }
                         onClick={() => toggleIntensity(track.id)}
                       >
-                        ◆
+                        <Diamond size={13} fill="currentColor" />
                       </button>
                     )}
                     {track.kind === 'csv' && (
                       <button className="tbtn" title="Edit envelope in a big dedicated canvas" onClick={() => setFocusTrack(track.id)}>
-                        ⛶
+                        <Maximize2 size={13} />
                       </button>
                     )}
                     <button className={'tbtn' + (mix.locked ? ' tbtn--on' : '')} title="Lock" onClick={() => props.onSetTrackMix(track.id, { locked: !mix.locked })}>
-                      {mix.locked ? '🔒' : '🔓'}
+                      {mix.locked ? <Lock size={13} /> : <Unlock size={13} />}
                     </button>
                   </div>
                 </div>

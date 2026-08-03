@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
+import { Activity, Check, Film, Lock, Music, Plus, TriangleAlert, X, type LucideIcon } from 'lucide-react'
 import type { MediaSource, RawItem } from '../types'
 import { middleEllipsis } from '../lib/format'
 import { PROCESS_PARAMS } from '../lib/process'
@@ -22,7 +23,7 @@ interface Props {
   onDragSourceEnd: () => void
 }
 
-const KIND_ICON: Record<MediaSource['kind'], string> = { video: '🎬', audio: '🎵', csv: '📈' }
+const KIND_ICON: Record<MediaSource['kind'], LucideIcon> = { video: Film, audio: Music, csv: Activity }
 
 export default function LibraryPanel({
   width,
@@ -47,11 +48,11 @@ export default function LibraryPanel({
   // Hide the audio sources extracted from videos — they ride along with the video.
   const ready = librarySources.filter((s) => !s.name.endsWith(' · audio'))
   const visible = kindFilter === 'all' ? ready : ready.filter((s) => s.kind === kindFilter)
-  const FILTERS: ['all' | MediaSource['kind'], string][] = [
+  const FILTERS: ['all' | MediaSource['kind'], ReactNode][] = [
     ['all', 'All'],
-    ['video', '🎬'],
-    ['audio', '🎵'],
-    ['csv', '📈'],
+    ['video', <Film size={13} />],
+    ['audio', <Music size={13} />],
+    ['csv', <Activity size={13} />],
   ]
   const count = (k: 'all' | MediaSource['kind']) => (k === 'all' ? ready.length : ready.filter((s) => s.kind === k).length)
   const relinkCount = ready.filter((s) => s.needsRelink).length
@@ -87,7 +88,7 @@ export default function LibraryPanel({
           onNewCarrier()
         }}
       >
-        ＋ New carrier (all 1s)
+        <Plus size={13} /> New carrier (all 1s)
       </button>
 
       {/* ② Process */}
@@ -100,14 +101,14 @@ export default function LibraryPanel({
         )}
       </div>
       <div className="stage__params" title="Fixed processing parameters (ported from your script)">
-        60 Hz · SG win {PROCESS_PARAMS.SG_WINDOW}/poly {PROCESS_PARAMS.SG_POLY} · normalize · 🔒 fixed
+        60 Hz · SG win {PROCESS_PARAMS.SG_WINDOW}/poly {PROCESS_PARAMS.SG_POLY} · normalize · <Lock size={11} style={{ verticalAlign: '-2px' }} /> fixed
       </div>
       <ul className="library__list">
         {rawData.length === 0 && <li className="library__placeholder">No raw CSV waiting</li>}
         {rawData.map((r) => (
           <li key={r.id} className={'raw__item' + (r.error ? ' raw__item--err' : '')}>
             <div className="raw__row">
-              <span className="mediabin__icon">📈</span>
+              <span className="mediabin__icon"><Activity size={15} /></span>
               <span className="library__name" title={r.name}>
                 {middleEllipsis(r.name, 18)}
               </span>
@@ -115,7 +116,7 @@ export default function LibraryPanel({
                 {processingId === r.id ? '…' : 'Process'}
               </button>
               <button className="track__remove" title="Discard" onClick={() => onRemoveRaw(r.id)}>
-                ✕
+                <X size={12} />
               </button>
             </div>
             {r.error && <div className="raw__err">{r.error}</div>}
@@ -132,7 +133,7 @@ export default function LibraryPanel({
             onClick={onRelinkAll}
             title="Pick all the original media files at once — they auto-match by filename"
           >
-            ⚠ Re-link all ({relinkCount})
+            <TriangleAlert size={12} /> Re-link all ({relinkCount})
           </button>
         )}
       </div>
@@ -156,6 +157,7 @@ export default function LibraryPanel({
         )}
         {visible.map((s) => {
           const onTl = onTimelineSourceIds.has(s.id)
+          const KindIcon = KIND_ICON[s.kind]
           return (
             <li
               key={s.id}
@@ -170,7 +172,7 @@ export default function LibraryPanel({
               }}
               onDragEnd={onDragSourceEnd}
             >
-              <span className="mediabin__icon">{KIND_ICON[s.kind]}</span>
+              <span className="mediabin__icon"><KindIcon size={15} /></span>
               <span className="library__name library__name--full" title={s.name}>
                 {s.name}
               </span>
@@ -180,12 +182,12 @@ export default function LibraryPanel({
                   title="Media missing — click to pick the original file and restore it"
                   onClick={() => onRelink(s.id)}
                 >
-                  ⚠ re-link
+                  <TriangleAlert size={11} /> re-link
                 </button>
               ) : (
                 <span className="library__hint">
-                  {onTl ? '✓ ' : ''}
-                  {s.fullDuration ? `${s.fullDuration.toFixed(1)}s` : '—'}
+                  {onTl && <Check size={11} />}
+                  {s.fullDuration ? ` ${s.fullDuration.toFixed(1)}s` : ' —'}
                 </span>
               )}
               <button
@@ -197,7 +199,7 @@ export default function LibraryPanel({
                   onRemoveSource(s.id)
                 }}
               >
-                ✕
+                <X size={12} />
               </button>
             </li>
           )

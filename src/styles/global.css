@@ -1,16 +1,75 @@
-:root {
-  --bg: #14161c;
-  --panel: #1c1f27;
-  --panel-2: #232732;
-  --border: #2c313d;
-  --text: #e7eaf0;
-  --text-dim: #9aa2b1;
-  --accent: #4f7cff;
+/* ============================================================
+   Design tokens — DARK is the default (:root); LIGHT overrides
+   under [data-theme='light']. Brand accent = orange in both.
+   ============================================================ */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0c0c0e;
+  --panel: #151517;
+  --panel-2: #1f1f24;
+  --border: #2a2a31;
+  --border-strong: #3a3a45;
+  --text: #f3efe9;
+  --text-dim: #9b958c;
+
+  --accent: #ff8a3d;
+  --accent-strong: #ffa25e;
+  --accent-dim: rgba(255, 138, 61, 0.15);
+  --accent-contrast: #1a1206;
+
+  --good: #35c98d;
+  --warn: #eab338;
+  --warn-dim: rgba(234, 179, 56, 0.12);
+  --warn-contrast: #1c1403;
+  --danger: #ff6a6a;
+  --danger-dim: rgba(255, 106, 106, 0.14);
+  --playhead: #ff5a4d;
+
+  --shadow: rgba(0, 0, 0, 0.5);
+  --scrollbar: rgba(155, 149, 140, 0.32);
+  --scrollbar-hover: rgba(155, 149, 140, 0.6);
+  --grid: rgba(155, 149, 140, 0.14);
+  --clip-tint: rgba(255, 255, 255, 0.04);
 }
 
-* { box-sizing: border-box; }
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f6f2ec;
+  --panel: #ffffff;
+  --panel-2: #f1ebe1;
+  --border: #e4ddd1;
+  --border-strong: #d2c9ba;
+  --text: #1d1a16;
+  --text-dim: #726b61;
 
-html, body, #root {
+  --accent: #e2620c;
+  --accent-strong: #c4530a;
+  --accent-dim: rgba(226, 98, 12, 0.1);
+  --accent-contrast: #ffffff;
+
+  --good: #16916a;
+  --warn: #b8791a;
+  --warn-dim: rgba(184, 121, 26, 0.12);
+  --warn-contrast: #ffffff;
+  --danger: #d13e3e;
+  --danger-dim: rgba(209, 62, 62, 0.1);
+  --playhead: #e5443f;
+
+  --shadow: rgba(80, 60, 40, 0.16);
+  --scrollbar: rgba(114, 107, 97, 0.34);
+  --scrollbar-hover: rgba(114, 107, 97, 0.6);
+  --grid: rgba(114, 107, 97, 0.12);
+  --clip-tint: rgba(20, 16, 10, 0.05);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
 }
@@ -27,18 +86,36 @@ button {
   cursor: pointer;
 }
 
-/* themed scrollbars — thin, dark, brighten on hover (Chrome/Safari/Edge + Firefox) */
+/* Keyboard focus is always visible (mouse clicks stay clean via :focus-visible). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+button:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* themed scrollbars — thin, theme-aware, brighten on hover */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 162, 177, 0.35) transparent;
+  scrollbar-color: var(--scrollbar) transparent;
 }
-::-webkit-scrollbar { width: 11px; height: 11px; }
-::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 162, 177, 0.3);
+  background: var(--scrollbar);
   border-radius: 8px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(148, 162, 177, 0.55); }
-::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

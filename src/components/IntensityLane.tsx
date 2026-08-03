@@ -26,7 +26,7 @@ interface Props {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 const PAD = 6
-const COLOR = '#e0b13a'
+const COLOR = '#f5871f' // envelope curve — warm orange, reads on both light & dark backgrounds
 const SNAP_T = 0.1 // seconds
 const SNAP_V = 0.05
 
@@ -267,7 +267,7 @@ export default function IntensityLane({
       )}
       {!sorted.length && !stroke && (
         <text x={10} y={height - 8} fill={COLOR} fontSize={11} opacity={0.8} pointerEvents="none">
-          {unitLabel} — click add · drag move · click a point then ✕ to delete · Erase sweeps · 🗑 Clear
+          {unitLabel} — click to add · drag to move · click a point then delete · Erase sweeps · Clear resets
         </text>
       )}
       {mode === 'point' &&

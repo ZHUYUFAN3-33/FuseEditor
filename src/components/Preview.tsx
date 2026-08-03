@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { ChevronLeft, ChevronRight, Pause, Play, Radio, Repeat, SkipBack, SkipForward, Video, Volume2 } from 'lucide-react'
 import { fmtTime } from '../lib/format'
 
 export interface VideoLayerInfo {
@@ -109,7 +110,9 @@ export default function Preview({
           </div>
         ) : (
           <div className="preview__placeholder">
-            <span className="preview__icon">▶</span>
+            <span className="preview__icon">
+              <Video size={40} strokeWidth={1.5} />
+            </span>
             <p>Preview</p>
             <span className="preview__sub">no video at the playhead</span>
           </div>
@@ -117,33 +120,33 @@ export default function Preview({
       </div>
       <div className="preview__transport">
         <button className="transport__btn" title="Go to start (Home)" onClick={() => onSeek(0)}>
-          ⏮
+          <SkipBack size={16} />
         </button>
         <button
           className="transport__btn"
           title={`Previous frame (1/${frameRate} s)`}
           onClick={() => onSeek(Math.max(0, playhead - 1 / frameRate))}
         >
-          ◁
+          <ChevronLeft size={18} />
         </button>
         <button className="transport__btn transport__btn--play" onClick={onTogglePlay} title="Play / Pause (Space)">
-          {isPlaying ? '⏸' : '▶'}
+          {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}
         </button>
         <button
           className="transport__btn"
           title={`Next frame (1/${frameRate} s)`}
           onClick={() => onSeek(Math.min(totalDuration, playhead + 1 / frameRate))}
         >
-          ▷
+          <ChevronRight size={18} />
         </button>
         <button className="transport__btn" title="Go to end (End)" onClick={() => onSeek(totalDuration)}>
-          ⏭
+          <SkipForward size={16} />
         </button>
         <button className={'transport__btn' + (loop ? ' transport__btn--on' : '')} title="Loop (L)" onClick={onToggleLoop}>
-          🔁
+          <Repeat size={16} />
         </button>
         <div className="transport__vol" title="Master volume">
-          🔊
+          <Volume2 size={16} />
           <input type="range" min={0} max={1} step={0.01} value={masterVolume} onChange={(e) => onMasterVolume(Number(e.target.value))} />
         </div>
         <span className="transport__time">
@@ -169,7 +172,7 @@ export default function Preview({
                 : 'Start live streaming to TouchDesigner (WebSocket)'
             }
           >
-            ● TD
+            <Radio size={13} /> TD
           </button>
           {liveTd && (
             <input

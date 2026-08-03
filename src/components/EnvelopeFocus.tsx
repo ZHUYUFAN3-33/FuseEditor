@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Diamond, Eraser, Magnet, Pencil, Trash2, Waves, X } from 'lucide-react'
 import type { Clip, Interp, Keyframe, MediaSource, Track } from '../types'
 import SeriesCanvas from './SeriesCanvas'
 import IntensityLane, { type LaneMode } from './IntensityLane'
@@ -81,13 +82,15 @@ export default function EnvelopeFocus({
   return (
     <div className="envfocus">
       <div className="envfocus__bar">
-        <span className="envfocus__title">◆ Envelope — {track.name}</span>
+        <span className="envfocus__title">
+          <Diamond size={13} fill="currentColor" style={{ verticalAlign: '-1px' }} /> Envelope — {track.name}
+        </span>
         <div className="toolgroup">
           {([
-            ['point', '✎ Point'],
-            ['pencil', '〜 Draw'],
-            ['erase', '⌫ Erase'],
-          ] as [LaneMode, string][]).map(([m, label]) => (
+            ['point', <><Pencil size={13} /> Point</>],
+            ['pencil', <><Waves size={13} /> Draw</>],
+            ['erase', <><Eraser size={13} /> Erase</>],
+          ] as [LaneMode, ReactNode][]).map(([m, label]) => (
             <button key={m} className={'tool' + (mode === m ? ' tool--on' : '')} onClick={() => setMode(m)}>
               {label}
             </button>
@@ -105,10 +108,10 @@ export default function EnvelopeFocus({
           ))}
         </div>
         <button className={'tool' + (snap ? ' tool--on' : '')} onClick={() => setSnap(!snap)}>
-          🧲 Snap
+          <Magnet size={13} /> Snap
         </button>
         <button className="tool" onClick={onClear}>
-          🗑 Clear
+          <Trash2 size={13} /> Clear
         </button>
         <div className="envfocus__spacer" />
         <span className="envfocus__stamp">Stamp:</span>
@@ -125,7 +128,7 @@ export default function EnvelopeFocus({
           ))}
         </div>
         <button className="tool envfocus__close" title="Close (Esc)" onClick={onClose}>
-          ✕ Done
+          <X size={14} /> Done
         </button>
       </div>
 

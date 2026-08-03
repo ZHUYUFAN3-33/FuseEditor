@@ -1,3 +1,4 @@
+import { Diamond } from 'lucide-react'
 import type { Clip, MediaSource } from '../types'
 import { fmtTime } from '../lib/format'
 
@@ -51,7 +52,8 @@ export default function Inspector({ width, clip, source, csvReadout, csvEnvGain,
               </p>
               {csvEnvGain != null && (
                 <p className="inspector__small inspector__envnote">
-                  ◆ envelope ×{csvEnvGain.toFixed(2)} applied — open the track's ◆ lane to edit / clear it
+                  <Diamond size={11} fill="currentColor" style={{ verticalAlign: '-1px' }} /> envelope ×
+                  {csvEnvGain.toFixed(2)} applied — open the track's envelope lane to edit / clear it
                 </p>
               )}
               <ul className="inspector__serieslist">

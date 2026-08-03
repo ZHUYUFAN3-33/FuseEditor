@@ -104,6 +104,17 @@ export default function App() {
   const [ampScale, setAmpScale] = useState(1)
   const [tool, setTool] = useState<Tool>('select')
   const [snap, setSnap] = useState(true)
+  const [theme, setTheme] = useState<'dark' | 'light'>(
+    () => ((typeof localStorage !== 'undefined' && localStorage.getItem('fuse-theme')) as 'dark' | 'light') || 'dark',
+  )
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    try {
+      localStorage.setItem('fuse-theme', theme)
+    } catch {
+      /* ignore */
+    }
+  }, [theme])
   // Multi-selection: an ordered list of clip ids. The last one is the "primary" (drives the
   // Inspector and the single-clip ops); the whole set moves together when you drag any member.
   const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -1229,6 +1240,8 @@ export default function App() {
         onRedo={history.redo}
         canUndo={history.canUndo}
         canRedo={history.canRedo}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
       />
       <div className="app__body">
         <LibraryPanel

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Activity, Film, Music } from 'lucide-react'
 
 interface CsvTrack {
   id: string
@@ -60,7 +61,7 @@ export default function ExportDialog({ hasAudio, hasCsv, hasVideo, exportLength,
           disabled={running || !hasAudio || pickedAudio.size === 0}
           onClick={() => run('Audio (.wav)', () => onExportWav(Array.from(pickedAudio)))}
         >
-          <span className="export__icon">🎵</span>
+          <span className="export__icon"><Music size={22} /></span>
           <span>
             <b>Audio — WAV <em>(one file per track)</em></b>
             <small>Each selected audio track → its own .wav, at the track's volume.</small>
@@ -91,7 +92,7 @@ export default function ExportDialog({ hasAudio, hasCsv, hasVideo, exportLength,
           disabled={running || !hasCsv || picked.size === 0}
           onClick={() => run('Time-series (.csv)', () => onExportCsv(csvRate, Array.from(picked)))}
         >
-          <span className="export__icon">📈</span>
+          <span className="export__icon"><Activity size={22} /></span>
           <span>
             <b>Time series — CSV <em>(one file per track)</em></b>
             <small>
@@ -141,7 +142,7 @@ export default function ExportDialog({ hasAudio, hasCsv, hasVideo, exportLength,
           disabled={running || !hasVideo}
           onClick={() => run('Video (.webm)', () => onExportVideo((p) => setStatus({ kind: 'running', msg: 'Recording video (.webm)', progress: p })))}
         >
-          <span className="export__icon">🎬</span>
+          <span className="export__icon"><Film size={22} /></span>
           <span>
             <b>Video — WebM <em>(real-time · experimental)</em></b>
             <small>Records the preview + mixed audio in real time. mp4 needs ffmpeg (Electron) later.</small>

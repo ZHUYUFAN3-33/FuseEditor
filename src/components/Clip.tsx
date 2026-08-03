@@ -1,3 +1,4 @@
+import { Lock } from 'lucide-react'
 import type { Clip as ClipT, Keyframe, MediaSource } from '../types'
 import { middleEllipsis } from '../lib/format'
 import WaveformCanvas from './WaveformCanvas'
@@ -74,6 +75,11 @@ export default function Clip({
       onClick={handleClick}
       title={clip.name}
     >
+      {locked && (
+        <span className="clip__lock">
+          <Lock size={11} />
+        </span>
+      )}
       <div className="clip__label" style={{ background: color }}>
         {middleEllipsis(clip.name, Math.max(6, Math.floor(width / 7)))}
       </div>
